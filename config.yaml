@@ -1,10 +1,24 @@
 hardware:
   mode: simulator
-  debug: true
+  debug: false          # turn off HAL debug
 
 plugins:
   enabled:
-    - test_plugin
+    - emotion
+    - sound
+    - idle
+
+simulator:
+  fps: 10               # not used now, but keep
+
+personality:
+  curiosity: 0.5
+  energy: 0.6
+  sociability: 0.5
+
+idle:
+  bored_after: 120
+  sleepy_after: 300
 
 logging:
-  level: DEBUG
+  level: INFO           # development default for plugin and runtime visibility
