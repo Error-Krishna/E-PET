@@ -1,0 +1,41 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Mac system files
+.DS_Store
+
+# Database files
+*.db
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# Config (optional if sensitive)
+# config.yaml
+
+# Pytest cache
+.pytest_cache/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Build files
+dist/
+build/
+*.egg-info/
+
+# Plugins cache
+plugins/**/__pycache__/
+core/**/__pycache__/
+tests/**/__pycache__/
