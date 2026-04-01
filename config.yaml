@@ -1,0 +1,10 @@
+hardware:
+  mode: simulator
+  debug: true
+
+plugins:
+  enabled:
+    - test_plugin
+
+logging:
+  level: DEBUG
