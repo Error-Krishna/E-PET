@@ -1,6 +1,7 @@
 import threading
 import logging
 import fnmatch
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Any
 
 logger = logging.getLogger(__name__)
@@ -10,6 +11,10 @@ class EventBus:
     def __init__(self):
         self._subscribers: Dict[str, List[Callable]] = {}
         self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=8,
+            thread_name_prefix="epet-bus",
+        )
 
     def subscribe(self, pattern: str, callback: Callable[[str, Any], None]) -> None:
         """Subscribe a callback to a topic pattern (supports * and ? wildcards)."""
@@ -35,10 +40,8 @@ class EventBus:
             with self._lock:
                 callbacks = self._subscribers[pattern][:]
             for callback in callbacks:
-                # Run each callback in a separate thread to avoid blocking
-                thread = threading.Thread(target=self._run_callback, args=(callback, topic, data))
-                thread.daemon = True
-                thread.start()
+                # Use a bounded pool to avoid creating unbounded threads under load.
+                self._executor.submit(self._run_callback, callback, topic, data)
 
     def _run_callback(self, callback: Callable, topic: str, data: Any) -> None:
         """Run a callback, catching and logging any exception."""

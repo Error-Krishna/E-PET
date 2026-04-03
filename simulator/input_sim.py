@@ -17,6 +17,7 @@ KEY_MAPPINGS = {
     'd': ('pet/input/touch', {'zone': 'double_tap'}),
     'm': ('pet/input/keyboard', {'action': 'cycle_mood'}),
     't': ('pet/input/keyboard', {'action': 'test_sound'}),
+    ' ': ('pet/input/wake_word', {'source': 'keyboard'}),
     'q': ('pet/system/quit', {}),
 }
 

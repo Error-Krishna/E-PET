@@ -1,0 +1,8 @@
+PyYAML
+numpy
+pygame
+requests
+pvporcupine
+openai-whisper
+PyAudio
+piper-tts

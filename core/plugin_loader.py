@@ -45,6 +45,8 @@ class PluginLoader:
             plugin_path = os.path.join(self.plugins_dir, plugin_name)
             if not os.path.isdir(plugin_path):
                 continue
+            if plugin_name.startswith("__"):
+                continue
 
             # Check if plugin is enabled
             if plugin_name not in self.enabled_plugins:

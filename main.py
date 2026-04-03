@@ -1,9 +1,11 @@
 import logging
+import warnings
 import yaml
 import time
 import sys
 import threading
 
+from core.config_validation import normalize_and_validate_config
 from core.event_bus import EventBus
 from core.hal import HALSimulator
 from core.memory import Memory
@@ -14,14 +16,22 @@ from simulator.input_sim import InputSimulator
 def setup_logging(level):
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        format="%(asctime)s | %(levelname).1s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
     )
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("pygame").setLevel(logging.WARNING)
+    logging.getLogger("numba").setLevel(logging.WARNING)
+    warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
+    warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 
 def main():
     # Load config
     try:
         with open("config.yaml", "r") as f:
-            config = yaml.safe_load(f)
+            config = normalize_and_validate_config(yaml.safe_load(f))
     except Exception as e:
         print(f"Failed to load config.yaml: {e}")
         sys.exit(1)
@@ -83,7 +93,16 @@ def main():
         face_renderer.stop()
         input_sim.stop()
         # Stop plugins that have stop methods (optional)
-        for engine in ['_emotion_engine', '_sound_engine', '_idle_tick']:
+        for engine in [
+            '_emotion_engine',
+            '_sound_engine',
+            '_idle_tick',
+            '_wake',
+            '_stt',
+            '_tts',
+            '_memory_manager',
+            '_brain',
+        ]:
             if hasattr(bus, engine):
                 getattr(bus, engine).stop()
         bus.publish("pet/sound/play", {"name": "shutdown"})

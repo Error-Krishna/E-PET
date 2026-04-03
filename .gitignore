@@ -2,40 +2,72 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 
 # Virtual environments
 venv/
 env/
 .venv/
+.env
+.env.*
+.python-version
 
 # Mac system files
 .DS_Store
 
+# Other OS / editor files
+Thumbs.db
+.idea/
+
 # Database files
 *.db
+*.sqlite3
 
 # Logs
 *.log
+*.out
+*.pid
 
 # VS Code
 .vscode/
 
 # Config (optional if sensitive)
 # config.yaml
+config.local.yaml
+config.*.local.yaml
 
 # Pytest cache
 .pytest_cache/
 
 # Coverage reports
 .coverage
+.coverage.*
 htmlcov/
 
 # Build files
 dist/
 build/
 *.egg-info/
+.eggs/
+pip-wheel-metadata/
 
 # Plugins cache
 plugins/**/__pycache__/
 core/**/__pycache__/
 tests/**/__pycache__/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+
+# Test / notebook artifacts
+.hypothesis/
+.ipynb_checkpoints/
+
+# Runtime media artifacts
+*.wav
+*.mp3
+
+# Local model / voice assets
+*.onnx
+*.bin
