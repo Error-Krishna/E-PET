@@ -7,6 +7,8 @@ plugins:
     - emotion
     - sound
     - idle
+    - voice
+    - ai
 
 simulator:
   fps: 10               # not used now, but keep
@@ -22,3 +24,36 @@ idle:
 
 logging:
   level: INFO           # development default for plugin and runtime visibility
+
+voice:
+  enabled: true
+  wake_word: "hey pip"
+  wake_mode: "auto"
+  wake_keyword: "computer"
+  porcupine_access_key: ""
+  porcupine_keyword_path: ""
+  piper_path: "piper"
+  tts_model: "/Users/krishnagoyal/Desktop/epet/voices/en_US-lessac-medium.onnx"
+  whisper_model: "tiny"
+  wake_whisper_model: "tiny"
+  record_seconds: 3
+  wake_listen_seconds: 2
+  wake_check_interval: 0.3
+  wake_cooldown_seconds: 4.0
+  interrupt_on_new_speech: true
+
+
+ai:
+  enabled: true
+  mode: local
+  model: phi3
+  api_key: ""
+  local_url: "http://localhost:11434/api/generate"
+  online_url: "https://api.openai.com/v1/chat/completions"
+  online_model: "gpt-3.5-turbo"
+  request_timeout: 60
+
+memory:
+  max_history: 20
+  persist_history: true
+  extract_facts: true
