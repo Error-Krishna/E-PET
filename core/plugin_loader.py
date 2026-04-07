@@ -51,7 +51,7 @@ class PluginLoader:
 
             # Check if plugin is enabled
             if plugin_name not in self.enabled_plugins:
-                logger.info(f"Plugin {plugin_name} is disabled, skipping")
+                logger.debug(f"Plugin {plugin_name} is disabled")
                 continue
 
             # Check for plugin.py
@@ -83,6 +83,6 @@ class PluginLoader:
                 # Pass the full application config so plugins can read the
                 # sections they depend on, like "idle" and "personality".
                 module.start(self.bus, self.hal, self.memory, self.config)
-                logger.info(f"Plugin {plugin_name} loaded successfully")
+                logger.info(f"Plugin loaded: {plugin_name}")
             except Exception as e:
                 logger.error(f"Failed to load plugin {plugin_name}: {e}", exc_info=True)

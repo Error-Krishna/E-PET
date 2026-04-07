@@ -17,6 +17,7 @@ personality:
   curiosity: 0.5
   energy: 0.6
   sociability: 0.5
+  name: "krishna"
 
 idle:
   bored_after: 120
@@ -28,15 +29,12 @@ logging:
 voice:
   enabled: true
   wake_word: "hello"
-  wake_mode: "auto"
-  wake_keyword: "computer"
-  porcupine_access_key: ""
-  porcupine_keyword_path: ""
+  wake_mode: "whisper"
   piper_path: "piper"
   tts_model: "/Users/krishnagoyal/Desktop/epet/voices/en_US-lessac-medium.onnx"
   whisper_model: "tiny"
   wake_whisper_model: "tiny"
-  record_seconds: 3
+  record_seconds: 4
   wake_listen_seconds: 2
   wake_check_interval: 0.3
   wake_cooldown_seconds: 4.0
@@ -46,7 +44,7 @@ voice:
 ai:
   enabled: true
   mode: local
-  model: phi3
+  model: "phi3:latest"
   api_key: ""
   local_url: "http://localhost:11434/api/generate"
   online_url: "https://api.openai.com/v1/chat/completions"

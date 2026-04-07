@@ -11,10 +11,8 @@ class EventBus:
     def __init__(self):
         self._subscribers: Dict[str, List[Callable]] = {}
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(
-            max_workers=8,
-            thread_name_prefix="epet-bus",
-        )
+        self._fast_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="epet-fast")
+        self._slow_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="epet-slow")
 
     def subscribe(self, pattern: str, callback: Callable[[str, Any], None]) -> None:
         """Subscribe a callback to a topic pattern (supports * and ? wildcards)."""
@@ -40,8 +38,8 @@ class EventBus:
             with self._lock:
                 callbacks = self._subscribers[pattern][:]
             for callback in callbacks:
-                # Use a bounded pool to avoid creating unbounded threads under load.
-                self._executor.submit(self._run_callback, callback, topic, data)
+                pool = self._slow_pool if topic.startswith("pet/ai/") or topic.startswith("pet/voice/") else self._fast_pool
+                pool.submit(self._run_callback, callback, topic, data)
 
     def _run_callback(self, callback: Callable, topic: str, data: Any) -> None:
         """Run a callback, catching and logging any exception."""
@@ -49,3 +47,7 @@ class EventBus:
             callback(topic, data)
         except Exception as e:
             logger.error(f"Error in callback for topic {topic}: {e}", exc_info=True)
+
+    def shutdown(self) -> None:
+        self._fast_pool.shutdown(wait=False)
+        self._slow_pool.shutdown(wait=False)

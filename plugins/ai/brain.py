@@ -3,6 +3,8 @@ import logging
 import queue
 import threading
 
+from core.utils import profile
+
 logger = logging.getLogger(__name__)
 
 # Try to import requests (should be installed)
@@ -12,7 +14,7 @@ try:
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    logger.warning("requests not installed; AI will use fallback responses")
+    logger.debug("requests not installed; AI will use fallback responses")
 
 
 class AIBrain:
@@ -30,7 +32,7 @@ class AIBrain:
         self._thread = None
         ai_config = config.get("ai", {})
         self.mode = ai_config.get("mode", "local")
-        self.model = ai_config.get("model", "phi3")
+        self.model = ai_config.get("model", "phi3:mini")
         self.api_key = ai_config.get("api_key", "")
         self.local_url = ai_config.get("local_url", "http://localhost:11434/api/generate")
         self.online_url = ai_config.get("online_url", "https://api.openai.com/v1/chat/completions")
@@ -55,27 +57,47 @@ class AIBrain:
         )
 
     def start(self):
-        # Wait for memory manager (it might start later)
-        self._thread = threading.Thread(target=self._process_queue)
-        self._thread.daemon = True
+        if hasattr(self.bus, "_ai_queue"):
+            logger.info("AI: request queue ready")
+            return
+        self._thread = threading.Thread(target=self._process_queue, daemon=True)
         self._thread.start()
-        logger.info("AI brain started")
+        logger.info("AI: ready")
 
     def stop(self):
         self._running = False
+        if hasattr(self.bus, "_ai_queue"):
+            try:
+                while True:
+                    try:
+                        self.bus._ai_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self.bus._ai_queue.put_nowait(None)
+            except Exception:
+                pass
+        if hasattr(self.bus, "_ai_worker") and self.bus._ai_worker:
+            self.bus._ai_worker.join(timeout=1)
+        if self._thread:
+            self._thread.join(timeout=1)
 
     def _on_speech(self, topic, data):
         text = data.get("text", "")
         if not text:
             return
+        target_queue = getattr(self.bus, "_ai_queue", self._queue)
         try:
-            self._queue.put_nowait(text)
-        except queue.Full:
             try:
-                self._queue.get_nowait()
+                target_queue.get_nowait()
             except queue.Empty:
                 pass
-            self._queue.put_nowait(text)
+            target_queue.put_nowait(text)
+        except queue.Full:
+            try:
+                target_queue.get_nowait()
+            except queue.Empty:
+                pass
+            target_queue.put_nowait(text)
 
     def _on_response(self, topic, data):
         return None
@@ -86,21 +108,29 @@ class AIBrain:
                 text = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            self._handle_input(text)
+            if text is None:
+                break
+            self._process_ai_request(text)
 
-    def _handle_input(self, text):
+    def _process_ai_request(self, text):
         # Build context
         if hasattr(self.bus, "_memory_manager"):
             context = self.bus._memory_manager.get_context()
+            user_name = getattr(self.bus._memory_manager, "user_name", "")
         else:
             context = ""
+            user_name = ""
         # Build prompt
+        name_line = f"The user's name is {user_name}." if user_name else "The user's name is not configured."
         prompt = f"""You are an AI assistant for an interactive pet. The user just said: "{text}".
+
+{name_line}
 
 Context from previous conversation and stored facts:
 {context}
 
 Your response should be concise and friendly. Also classify the intent into one of: task, question, social, system.
+Never guess or invent the user's name. If a name is provided above, use only that name.
 Return a JSON object with fields:
 - "text": string
 - "intent": one of task, question, social, system
@@ -108,7 +138,6 @@ Return a JSON object with fields:
 - "actions": optional list of action objects
 
 Allowed actions:
-- {{"type": "remember_fact", "key": "name", "value": "Alice"}}
 - {{"type": "remember_fact", "key": "likes", "value": "cats"}}
 - {{"type": "set_mood", "value": "happy"}}
 
@@ -134,6 +163,7 @@ Example:
             intent = "system"
             emotion = "neutral"
             actions = []
+        listen_after = intent == "question" or text_out.rstrip().endswith("?")
         # Publish response
         self.bus.publish(
             "pet/ai/response",
@@ -142,6 +172,7 @@ Example:
                 "intent": intent,
                 "emotion_suggestion": emotion,
                 "actions": actions,
+                "listen_after": listen_after,
             },
         )
         for action in actions:
@@ -152,6 +183,7 @@ Example:
             {
                 "text": text_out,
                 "emotion": emotion,
+                "listen_after": listen_after,
             },
         )
 
@@ -235,6 +267,7 @@ Example:
             "actions": actions,
         }
 
+    @profile
     def _local_inference(self, prompt):
         if not REQUESTS_AVAILABLE:
             return self._fallback_payload()
@@ -242,6 +275,8 @@ Example:
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "num_predict": 120,
+            "temperature": 0.7,
         }
         try:
             resp = requests.post(self.local_url, json=payload, timeout=self.request_timeout)

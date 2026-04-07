@@ -64,7 +64,7 @@ class EmotionEngine:
         self.bus.subscribe("pet/system/tick", self._on_tick)
         self.bus.subscribe("pet/input/keyboard", self._on_debug)
         self.bus.subscribe("pet/ai/response", self._on_ai_response)
-        logger.info("Emotion engine started")
+        logger.info("Emotion: ready")
 
     def stop(self):
         self._running = False
@@ -119,7 +119,7 @@ class EmotionEngine:
             "triggered_by": triggered_by,
         }
         self.bus.publish("pet/emotion/changed", mood_data)
-        logger.info(f"Mood changed: {self.current_mood} (trigger: {triggered_by})")
+        logger.info(f"Emotion: {new_mood} (source: {triggered_by})")
 
     def _apply_mood(self):
         mood = MOODS[self.current_mood]

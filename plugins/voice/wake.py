@@ -4,25 +4,41 @@ import tempfile
 import threading
 import time
 import wave
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Try to import porcupine; fallback to keyboard only
 try:
     import pvporcupine
 
     PORCUPINE_AVAILABLE = True
 except ImportError:
     PORCUPINE_AVAILABLE = False
-    logger.warning("pvporcupine not installed; wake word disabled, use SPACE key as fallback")
+    logger.debug("pvporcupine not installed")
 
 try:
-    import whisper
+    from faster_whisper import WhisperModel
+    FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    FASTER_WHISPER_AVAILABLE = False
+    WhisperModel = None
+
+try:
+    from pvrecorder import PvRecorder
+    PVRECORDER_AVAILABLE = True
+except ImportError:
+    PVRECORDER_AVAILABLE = False
+    PvRecorder = None
+
+try:
     import pyaudio
 
-    WHISPER_WAKE_AVAILABLE = True
+    PYAUDIO_AVAILABLE = True
 except ImportError:
-    WHISPER_WAKE_AVAILABLE = False
+    PYAUDIO_AVAILABLE = False
+    pyaudio = None
+
+WHISPER_WAKE_AVAILABLE = FASTER_WHISPER_AVAILABLE and (PVRECORDER_AVAILABLE or PYAUDIO_AVAILABLE)
 
 
 class WakeWordDetector:
@@ -63,6 +79,7 @@ class WakeWordDetector:
         self.cooldown_seconds = float(self.voice_config.get("wake_cooldown_seconds", 4.0))
         self.porcupine = None
         self.whisper_model = None
+        self.recorder = None
         self.audio_interface = None
         self.audio_stream = None
         self._mode = "keyboard"
@@ -78,14 +95,12 @@ class WakeWordDetector:
             if self._setup_whisper_wake():
                 return
 
-        logger.info("Wake word detector using keyboard fallback via input simulator (press SPACE)")
+        logger.info("Wake: keyboard fallback (press space)")
 
     def _setup_porcupine(self):
         if not PORCUPINE_AVAILABLE:
             return False
         try:
-            import pyaudio
-
             if not self.access_key:
                 raise ValueError("missing porcupine_access_key in config.voice")
             create_kwargs = {"access_key": self.access_key}
@@ -101,40 +116,48 @@ class WakeWordDetector:
                 create_kwargs["keywords"] = [keyword]
 
             self.porcupine = pvporcupine.create(**create_kwargs)
-            self.audio_interface = pyaudio.PyAudio()
-            self.audio_stream = self.audio_interface.open(
-                rate=self.porcupine.sample_rate,
-                channels=1,
-                format=pyaudio.paInt16,
-                input=True,
-                frames_per_buffer=self.porcupine.frame_length,
-            )
+            self._init_recorder(frame_length=self.porcupine.frame_length)
             self._mode = "porcupine"
-            logger.info(f"Wake word detector initialised for '{self.wake_keyword}'")
+            logger.info(f"Wake: Porcupine '{self.wake_keyword}'")
             return True
         except Exception as e:
-            logger.warning(f"Porcupine initialisation failed: {e}")
+            logger.debug(f"Porcupine initialisation failed: {e}")
             self.porcupine = None
             self.audio_stream = None
+            self.recorder = None
             return False
 
     def _setup_whisper_wake(self):
         if not WHISPER_WAKE_AVAILABLE:
             return False
         try:
-            import pyaudio
-
-            self.audio_interface = pyaudio.PyAudio()
+            self._init_recorder(frame_length=1024)
             self._mode = "whisper"
-            logger.info(
-                f"Wake word detector using spoken wake phrase '{self.wake_word}' "
-                f"with Whisper model '{self.wake_whisper_model}'"
-            )
+            logger.info(f"Wake: Whisper phrase '{self.wake_word}' ({self.wake_whisper_model})")
             return True
         except Exception as e:
-            logger.warning(f"Whisper wake detector initialisation failed: {e}")
+            logger.debug(f"Whisper wake detector initialisation failed: {e}")
             self.audio_interface = None
+            self.recorder = None
             return False
+
+    def _init_recorder(self, frame_length):
+        if PvRecorder is not None:
+            self.recorder = PvRecorder(device_index=-1, frame_length=frame_length)
+            self.audio_stream = self.recorder
+            self.audio_interface = self.recorder
+            return
+
+        import pyaudio
+
+        self.audio_interface = pyaudio.PyAudio()
+        self.audio_stream = self.audio_interface.open(
+            rate=16000,
+            channels=1,
+            format=pyaudio.paInt16,
+            input=True,
+            frames_per_buffer=frame_length,
+        )
 
     def start(self):
         self._thread = threading.Thread(target=self._run)
@@ -149,6 +172,16 @@ class WakeWordDetector:
             self.audio_stream.stop_stream()
         if self.audio_stream and hasattr(self.audio_stream, "close"):
             self.audio_stream.close()
+        if self.recorder and hasattr(self.recorder, "stop"):
+            try:
+                self.recorder.stop()
+            except Exception:
+                pass
+        if self.recorder and hasattr(self.recorder, "delete"):
+            try:
+                self.recorder.delete()
+            except Exception:
+                pass
         if self.audio_interface and hasattr(self.audio_interface, "terminate"):
             self.audio_interface.terminate()
         if self.porcupine and hasattr(self.porcupine, "delete"):
@@ -159,14 +192,17 @@ class WakeWordDetector:
             # Real mic detection
             while self._running:
                 try:
-                    pcm = self.audio_stream.read(
-                        self.porcupine.frame_length,
-                        exception_on_overflow=False,
-                    )
+                    if self.recorder is not None:
+                        pcm = self.audio_stream.read()
+                    else:
+                        pcm = self.audio_stream.read(
+                            self.porcupine.frame_length,
+                            exception_on_overflow=False,
+                        )
                     if pcm:
                         keyword_index = self.porcupine.process(pcm)
                         if keyword_index >= 0:
-                            logger.info("Wake word detected")
+                            logger.info("Wake: triggered")
                             self.bus.publish(
                                 "pet/input/wake_word",
                                 {"source": "mic", "wake_word": self.wake_word},
@@ -192,41 +228,63 @@ class WakeWordDetector:
 
     def _ensure_whisper_model_loaded(self):
         if self.whisper_model is None:
-            logger.info(f"Loading wake-word Whisper model '{self.wake_whisper_model}'...")
-            self.whisper_model = whisper.load_model(self.wake_whisper_model)
-            logger.info("Wake-word Whisper model loaded")
+            logger.info(f"Wake: loading Whisper model '{self.wake_whisper_model}'")
+            self.whisper_model = WhisperModel(self.wake_whisper_model, device="cpu", compute_type="int8")
+            logger.info("Wake: model ready")
 
     def _capture_and_transcribe_phrase(self):
-        import pyaudio
-
         self._ensure_whisper_model_loaded()
-        chunk = 1024
         rate = 16000
-        stream = self.audio_interface.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=rate,
-            input=True,
-            frames_per_buffer=chunk,
-        )
         frames = []
         try:
-            for _ in range(0, int(rate / chunk * self.listen_seconds)):
-                frames.append(stream.read(chunk, exception_on_overflow=False))
+            if self.recorder is not None:
+                frame_length = getattr(self.recorder, "frame_length", 1024)
+                self.recorder.start()
+                try:
+                    for _ in range(0, int(rate / frame_length * self.listen_seconds)):
+                        frames.extend(self.audio_stream.read())
+                finally:
+                    self.recorder.stop()
+            else:
+                if pyaudio is None:
+                    raise RuntimeError("pyaudio backend is not available")
+                import pyaudio
+
+                chunk = 1024
+                stream = self.audio_interface.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=chunk,
+                )
+                try:
+                    for _ in range(0, int(rate / chunk * self.listen_seconds)):
+                        frames.append(stream.read(chunk, exception_on_overflow=False))
+                finally:
+                    stream.stop_stream()
+                    stream.close()
         finally:
-            stream.stop_stream()
-            stream.close()
+            pass
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             path = handle.name
         try:
             with wave.open(path, "wb") as wav_file:
                 wav_file.setnchannels(1)
-                wav_file.setsampwidth(self.audio_interface.get_sample_size(pyaudio.paInt16))
                 wav_file.setframerate(rate)
-                wav_file.writeframes(b"".join(frames))
-            result = self.whisper_model.transcribe(path, fp16=False)
-            return result.get("text", "").strip()
+                if self.recorder is not None:
+                    wav_file.setsampwidth(2)
+                    wav_file.writeframes(np.asarray(frames, dtype=np.int16).tobytes())
+                else:
+                    if pyaudio is None:
+                        raise RuntimeError("pyaudio backend is not available")
+                    import pyaudio
+
+                    wav_file.setsampwidth(self.audio_interface.get_sample_size(pyaudio.paInt16))
+                    wav_file.writeframes(b"".join(frames))
+            segments, _ = self.whisper_model.transcribe(path, beam_size=1)
+            return " ".join([segment.text for segment in segments]).strip()
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -238,7 +296,7 @@ class WakeWordDetector:
 
     def _publish_wake(self, source, transcript=""):
         self._last_wake_time = time.time()
-        logger.info(f"Wake word detected from {source}")
+        logger.info(f"Wake: triggered ({source})")
         self.bus.publish(
             "pet/input/wake_word",
             {"source": source, "wake_word": self.wake_word, "transcript": transcript},

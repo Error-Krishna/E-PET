@@ -17,7 +17,7 @@ class IdleTick:
         self._thread = threading.Thread(target=self._run)
         self._thread.daemon = True
         self._thread.start()
-        logger.info("Idle tick thread started")
+        logger.info("Idle: ticking every 1s")
 
     def stop(self):
         self._running = False

@@ -1,11 +1,16 @@
-PyYAML
-numpy
-pygame
-requests
+# Core runtime dependencies
+PyYAML>=6.0
+numpy>=1.26
+pygame>=2.6
+requests>=2.31
+faster-whisper>=1.2.1
+pvrecorder>=1.2.4
+pyttsx3>=2.90
 
-# Optional voice stack. Leave commented out for the most portable install.
-# Uncomment the packages you need for wake-word / microphone / Piper support.
+# Voice enhancement packages
+# The project works with the default install, and these packages improve wake
+# words or audio quality on supported systems.
+#
 # pvporcupine
-# openai-whisper
-# PyAudio
+# pyaudio
 # piper-tts

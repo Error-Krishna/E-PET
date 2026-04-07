@@ -14,6 +14,9 @@ class Memory:
             path.parent.mkdir(parents=True, exist_ok=True)
             db_path = str(path)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self.conn.commit()
         self._lock = threading.Lock()
         self._init_db()
 

@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 # path so we can support platform-specific installs and custom paths.
 PIPER_AVAILABLE = True
 
+try:
+    import pyttsx3
+
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    pyttsx3 = None
+    PYTTSX3_AVAILABLE = False
+
 
 class TextToSpeech:
     def __init__(self, bus, hal, memory, config):
@@ -32,6 +40,13 @@ class TextToSpeech:
         # Piper path (assume installed)
         self.piper_path = config.get("voice", {}).get("piper_path", "piper")
         self.speed_multiplier = 1.0  # adjust based on emotion
+        self._system_tts = None
+        if PYTTSX3_AVAILABLE:
+            try:
+                self._system_tts = pyttsx3.init()
+            except Exception as e:
+                logger.warning(f"pyttsx3 initialisation failed: {e}")
+                self._system_tts = None
 
     def start(self):
         self._thread = threading.Thread(target=self._run)
@@ -55,6 +70,7 @@ class TextToSpeech:
             self._clear_queue()
             self._stop_playback()
         emotion = data.get("emotion", "neutral")
+        listen_after = bool(data.get("listen_after", False))
         # Adjust speed based on emotion (example)
         if emotion in ["excited", "happy"]:
             speed = 1.2
@@ -63,13 +79,13 @@ class TextToSpeech:
         else:
             speed = 1.0
         try:
-            self._queue.put_nowait((text, speed))
+            self._queue.put_nowait((text, speed, listen_after))
         except queue.Full:
             try:
                 self._queue.get_nowait()
             except queue.Empty:
                 pass
-            self._queue.put_nowait((text, speed))
+            self._queue.put_nowait((text, speed, listen_after))
 
     def _on_stop(self, topic, data):
         self._clear_queue()
@@ -79,13 +95,17 @@ class TextToSpeech:
     def _run(self):
         while self._running:
             try:
-                text, speed = self._queue.get(timeout=0.1)
+                text, speed, listen_after = self._queue.get(timeout=0.1)
                 self._publish_state("speaking", text)
                 if self._piper_is_available():
                     self._speak_piper(text, speed)
+                elif self._system_tts is not None:
+                    self._speak_system_tts(text, speed)
                 else:
                     self._print_text(text)
                 self._publish_state("idle", text)
+                if listen_after:
+                    self._publish_listen_for_reply(text)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -115,7 +135,10 @@ class TextToSpeech:
                 self._play_audio_file(audio_file)
         except Exception as e:
             logger.warning(f"Piper execution error, falling back to terminal output: {e}")
-            self._print_text(text)
+            if self._system_tts is not None:
+                self._speak_system_tts(text, speed)
+            else:
+                self._print_text(text)
         finally:
             if os.path.exists(audio_file):
                 os.unlink(audio_file)
@@ -127,6 +150,15 @@ class TextToSpeech:
 
     def _print_text(self, text):
         print(f"\n[E-Pet says]: {text}")
+
+    def _speak_system_tts(self, text, speed):
+        try:
+            self._system_tts.setProperty("rate", int(170 * speed))
+            self._system_tts.say(text)
+            self._system_tts.runAndWait()
+        except Exception as e:
+            logger.warning(f"System TTS failed, falling back to terminal output: {e}")
+            self._print_text(text)
 
     def _play_audio_process(self, cmd):
         player = resolve_executable(cmd[0])
@@ -186,6 +218,16 @@ class TextToSpeech:
             "pet/voice/tts_state",
             {
                 "state": state,
+                "text": text,
+                "timestamp": time.time(),
+            },
+        )
+
+    def _publish_listen_for_reply(self, text):
+        self.bus.publish(
+            "pet/voice/listen_for_reply",
+            {
+                "source": "tts",
                 "text": text,
                 "timestamp": time.time(),
             },
