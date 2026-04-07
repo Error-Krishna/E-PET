@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
         "energy": 0.6,
         "sociability": 0.5,
         "bond_level": 0.0,
+        "name": "krishna",
     },
     "idle": {
         "bored_after": 120,
@@ -45,7 +46,7 @@ DEFAULT_CONFIG = {
     "ai": {
         "enabled": True,
         "mode": "local",
-        "model": "phi3",
+        "model": "phi3:mini",
         "api_key": "",
         "local_url": "http://localhost:11434/api/generate",
         "online_url": "https://api.openai.com/v1/chat/completions",

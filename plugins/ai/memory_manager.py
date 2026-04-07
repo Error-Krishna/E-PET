@@ -18,13 +18,16 @@ class MemoryManager:
         self.max_history = self.memory_config.get("max_history", 20)
         self.persist_history = self.memory_config.get("persist_history", True)
         self.extract_facts = self.memory_config.get("extract_facts", True)
+        self.user_name = str(config.get("personality", {}).get("name", "")).strip()
 
     def start(self):
         self._load_persisted_history()
+        if self.user_name:
+            self.memory.remember("facts", "name", self.user_name)
         self.bus.subscribe("pet/input/speech", self._on_speech)
         self.bus.subscribe("pet/ai/response", self._on_response)
         self.bus.subscribe("pet/ai/action", self._on_action)
-        logger.info("Memory manager started")
+        logger.info("Memory: tracking conversation and facts")
 
     def stop(self):
         self._running = False
@@ -71,8 +74,22 @@ class MemoryManager:
         except json.JSONDecodeError:
             logger.warning("Failed to load persisted conversation history")
 
+    def get_recent_history(self, limit=8):
+        """Return the most recent conversation turns in chronological order."""
+        if limit <= 0:
+            return []
+        return self._history[-limit:]
+
     def _extract_and_store_facts(self, text):
         if not self.extract_facts:
+            return
+
+        if self.user_name:
+            # Configured name is the source of truth; do not let speech overwrite it.
+            self.memory.remember("facts", "name", self.user_name)
+            like_match = re.search(r"\bI (?:like|love) ([A-Za-z0-9 ,'-]{1,60})", text.strip(), re.IGNORECASE)
+            if like_match:
+                self.memory.remember("facts", "likes", like_match.group(1).strip())
             return
 
         cleaned = text.strip()
@@ -96,10 +113,8 @@ class MemoryManager:
 
     def get_context(self):
         """Return conversation history and extracted facts as a string."""
-        # Simple: join last N messages
-        context = "\n".join(
-            [f"{msg['role']}: {msg['text']}" for msg in self._history[-self.max_history :]]
-        )
+        recent_history = self.get_recent_history(limit=8)
+        context = "\n".join([f"{msg['role']}: {msg['text']}" for msg in recent_history])
         # Retrieve facts from memory
         name = self.memory.recall("facts", "name")
         likes = self.memory.recall("facts", "likes")

@@ -11,7 +11,7 @@ try:
     import pygame
     SOUND_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Sound engine disabled: {e}")
+    logger.debug(f"Sound engine disabled: {e}")
     SOUND_AVAILABLE = False
 
 class SoundEngine:
@@ -43,17 +43,21 @@ class SoundEngine:
         if self.audio_enabled:
             try:
                 pygame.mixer.init(frequency=22050, size=-16, channels=1)
-                logger.info("Pygame mixer initialised")
+                self._sound_cache = {}
+                self._preload_sounds()
+                logger.info("Sound: audio ready")
             except pygame.error as e:
                 self.audio_enabled = False
-                logger.warning(f"Sound engine running in dummy mode: {e}")
+                self._sound_cache = {}
+                logger.info("Sound: silent mode")
         else:
-            logger.warning("Sound engine running in dummy mode (no audio)")
+            self._sound_cache = {}
+            logger.info("Sound: silent mode")
 
     def start(self):
         self.bus.subscribe("pet/sound/play", self._on_play_sound)
         self.bus.subscribe("pet/emotion/changed", self._on_emotion_changed)
-        logger.info("Sound engine started")
+        logger.info("Sound: ready")
 
     def stop(self):
         self._running = False
@@ -65,7 +69,7 @@ class SoundEngine:
         if name in self.sounds:
             self._play_sound(name)
         else:
-            logger.warning(f"Unknown sound: {name}")
+            logger.debug(f"Unknown sound: {name}")
 
     def _on_emotion_changed(self, topic, data):
         sound = data.get("sound")
@@ -77,21 +81,31 @@ class SoundEngine:
     def _play_sound(self, name):
         """Generate and play sound in a separate thread to avoid blocking."""
         if not self.audio_enabled:
-            logger.debug(f"Sound would play: {name}")
+            logger.debug(f"Sound queued (silent mode): {name}")
             return
         def play():
             try:
-                samples = self.sounds[name]()
-                # Convert to 16-bit ints
-                samples = (samples * 32767).astype(np.int16)
-                # Create pygame Sound object
-                sound = pygame.sndarray.make_sound(samples)
+                sound = self._sound_cache.get(name, self._sound_cache.get("neutral"))
+                if sound is None:
+                    logger.debug(f"No cached sound available for {name}")
+                    return
                 sound.play()
             except Exception as e:
                 logger.error(f"Error playing sound {name}: {e}")
         thread = threading.Thread(target=play)
         thread.daemon = True
         thread.start()
+
+    def _preload_sounds(self):
+        for name, generator in self.sounds.items():
+            try:
+                samples = generator()
+                samples = (samples * 32767).astype(np.int16)
+                self._sound_cache[name] = pygame.sndarray.make_sound(samples)
+            except Exception as e:
+                logger.warning(f"Failed to cache sound {name}: {e}")
+        if "neutral" not in self._sound_cache and "boop" in self._sound_cache:
+            self._sound_cache["neutral"] = self._sound_cache["boop"]
 
     # ----- Sound synthesis functions -----
     @staticmethod

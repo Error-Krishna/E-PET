@@ -21,10 +21,16 @@ def setup_logging(level):
         datefmt="%H:%M:%S",
         force=True,
     )
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("pygame").setLevel(logging.WARNING)
-    logging.getLogger("numba").setLevel(logging.WARNING)
+    for noisy in [
+        "urllib3",
+        "requests",
+        "pygame",
+        "numba",
+        "httpx",
+        "huggingface_hub",
+        "faster_whisper",
+    ]:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
     warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 
@@ -44,57 +50,54 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("Config loaded")
 
-    # Initialize systems
+    logger.info("Starting event bus")
     bus = EventBus()
-    logger.info("Event bus initialized")
+    logger.info("Event bus ready")
 
-    # HAL
     hal_mode = config.get("hardware", {}).get("mode", "simulator")
     hal_debug = config.get("hardware", {}).get("debug", False)
     if hal_mode != "simulator":
-        logger.warning(f"Hardware mode '{hal_mode}' not supported; falling back to simulator")
+        logger.info("Hardware mode '%s' not supported; using simulator", hal_mode)
+    logger.info("Starting HAL simulator")
     hal = HALSimulator(debug=hal_debug)
-    logger.info("HAL initialized (simulator)")
+    logger.info("HAL ready")
 
-    # Memory
+    logger.info("Opening memory store")
     memory = Memory(get_database_path())
-    logger.info("Memory system initialized")
+    logger.info("Memory ready")
 
-    # Load plugins (including emotion, sound, idle)
     enabled_plugins = config.get("plugins", {}).get("enabled", [])
+    logger.info("Loading plugins: %s", ", ".join(enabled_plugins) if enabled_plugins else "none")
     loader = PluginLoader(enabled_plugins, bus, hal, memory, config)
     loader.load_plugins()
-    logger.info("Plugin loading complete")
+    logger.info("Plugins ready")
 
-    # Start simulator components
+    logger.info("Starting terminal renderer")
     face_renderer = FaceRenderer(bus, hal, memory, config)
     face_renderer.start()
+    logger.info("Starting keyboard input")
     input_sim = InputSimulator(bus)
     input_sim.start()
 
-    # Play startup sound via event bus
     bus.publish("pet/sound/play", {"name": "startup"})
 
-    # Main loop
-    logger.info("E-Pet V1 running. Press Q to quit.")
+    logger.info("Runtime active. Press q to quit.")
     try:
-        # Use event loop to process quit
         quit_event = threading.Event()
+
         def on_quit(topic, data):
-            logger.info("Received quit event, shutting down...")
+            logger.info("Shutdown requested")
             quit_event.set()
+
         bus.subscribe("pet/system/quit", on_quit)
 
-        # Keep main thread alive until quit
         quit_event.wait()
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received.")
+        logger.info("Keyboard interrupt received")
     finally:
-        # Clean shutdown
-        logger.info("Shutting down...")
+        logger.info("Stopping runtime")
         face_renderer.stop()
         input_sim.stop()
-        # Stop plugins that have stop methods (optional)
         for engine in [
             '_emotion_engine',
             '_sound_engine',
@@ -108,9 +111,10 @@ def main():
             if hasattr(bus, engine):
                 getattr(bus, engine).stop()
         bus.publish("pet/sound/play", {"name": "shutdown"})
-        time.sleep(0.5)  # Allow sound to play
+        time.sleep(0.3)
+        bus.shutdown()
         memory.close()
-        logger.info("Goodbye!")
+        logger.info("Goodbye")
 
 if __name__ == "__main__":
     main()

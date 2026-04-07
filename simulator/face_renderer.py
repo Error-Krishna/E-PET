@@ -34,9 +34,15 @@ class SimpleRenderer:
         self.hal.set_face(self.current_mood)
 
     def _render_loop(self):
+        target_fps = 10
+        frame_time = 1.0 / target_fps
         while self._running:
+            start = time.perf_counter()
             self._draw_status()
-            time.sleep(0.1)   # update 10 times per second
+            elapsed = time.perf_counter() - start
+            sleep_time = frame_time - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     def _draw_status(self):
         # Print a single line, overwriting the previous one
