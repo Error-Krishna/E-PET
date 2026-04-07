@@ -9,6 +9,7 @@ from core.config_validation import normalize_and_validate_config
 from core.event_bus import EventBus
 from core.hal import HALSimulator
 from core.memory import Memory
+from core.platform_utils import get_config_path, get_database_path
 from core.plugin_loader import PluginLoader
 from simulator.face_renderer import SimpleRenderer as FaceRenderer
 from simulator.input_sim import InputSimulator
@@ -30,10 +31,11 @@ def setup_logging(level):
 def main():
     # Load config
     try:
-        with open("config.yaml", "r") as f:
+        config_path = get_config_path()
+        with config_path.open("r", encoding="utf-8") as f:
             config = normalize_and_validate_config(yaml.safe_load(f))
     except Exception as e:
-        print(f"Failed to load config.yaml: {e}")
+        print(f"Failed to load {get_config_path().name}: {e}")
         sys.exit(1)
 
     # Setup logging
@@ -55,7 +57,7 @@ def main():
     logger.info("HAL initialized (simulator)")
 
     # Memory
-    memory = Memory("epet.db")
+    memory = Memory(get_database_path())
     logger.info("Memory system initialized")
 
     # Load plugins (including emotion, sound, idle)

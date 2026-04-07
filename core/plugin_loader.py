@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import sys
 import types
+from pathlib import Path
 from typing import List, Any
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ class PluginLoader:
         self.hal = hal
         self.memory = memory
         self.config = config
-        self.plugins_dir = plugins_dir or os.path.join(os.path.dirname(__file__), "..", "plugins")
+        self.plugins_dir = str(Path(plugins_dir) if plugins_dir else Path(__file__).resolve().parent.parent / "plugins")
 
     def _ensure_plugins_package(self) -> None:
         """Expose the plugins directory as an importable package for relative imports."""

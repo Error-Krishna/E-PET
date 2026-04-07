@@ -7,6 +7,8 @@ import tempfile
 import wave
 import numpy as np
 
+from core.platform_utils import is_interactive_input
+
 logger = logging.getLogger(__name__)
 
 # Try to import whisper and pyaudio; fallback to keyboard input
@@ -69,6 +71,9 @@ class SpeechToText:
                 self.record_queue.put_nowait(("record", None))
         else:
             # Fallback: read from terminal input
+            if not is_interactive_input():
+                logger.info("STT fallback skipped because stdin is not interactive")
+                return
             logger.info("STT fallback: enter text:")
             try:
                 text = sys.stdin.readline().strip()

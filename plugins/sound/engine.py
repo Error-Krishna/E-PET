@@ -70,7 +70,7 @@ class SoundEngine:
     def _on_emotion_changed(self, topic, data):
         sound = data.get("sound")
         if sound and sound in self.sounds:
-            self._play_sound(sound)
+            self.bus.publish("pet/sound/play", {"name": sound, "source": "emotion"})
         # Also log to HAL for tracking
         self.hal.play_sound(sound)
 

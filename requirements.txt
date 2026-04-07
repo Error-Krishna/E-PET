@@ -2,7 +2,10 @@ PyYAML
 numpy
 pygame
 requests
-pvporcupine
-openai-whisper
-PyAudio
-piper-tts
+
+# Optional voice stack. Leave commented out for the most portable install.
+# Uncomment the packages you need for wake-word / microphone / Piper support.
+# pvporcupine
+# openai-whisper
+# PyAudio
+# piper-tts

@@ -2,6 +2,7 @@ import logging
 import threading
 import sys
 import time
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -40,25 +41,59 @@ class InputSimulator:
             self._thread.join(timeout=1)
 
     def _run(self):
-        # Use raw terminal input (Unix) or msvcrt (Windows)
-        if sys.platform == 'win32':
-            import msvcrt
+        # Use raw terminal input (Unix) or msvcrt (Windows) when stdin is interactive.
+        if not sys.stdin.isatty():
+            logger.warning("Input simulator disabled because stdin is not interactive")
             while self._running:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch().decode('ascii', errors='ignore').lower()
-                    self._handle_key(ch)
-                time.sleep(0.01)
+                time.sleep(0.2)
+            return
+
+        if os.name == "nt":
+            self._run_windows()
         else:
-            import tty, termios
+            self._run_posix()
+
+    def _run_windows(self):
+        try:
+            import msvcrt
+        except Exception as e:
+            logger.warning(f"Windows keyboard input unavailable: {e}")
+            return self._idle_loop()
+
+        while self._running:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch().lower()
+                self._handle_key(ch)
+            time.sleep(0.01)
+
+    def _run_posix(self):
+        try:
+            import tty
+            import termios
+        except Exception as e:
+            logger.warning(f"POSIX keyboard input unavailable: {e}")
+            return self._idle_loop()
+
+        try:
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setraw(fd)
-                while self._running:
-                    ch = sys.stdin.read(1).lower()
-                    self._handle_key(ch)
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception as e:
+            logger.warning(f"Terminal raw mode unavailable: {e}")
+            return self._idle_loop()
+
+        try:
+            tty.setraw(fd)
+            while self._running:
+                ch = sys.stdin.read(1)
+                if not ch:
+                    continue
+                self._handle_key(ch.lower())
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    def _idle_loop(self):
+        while self._running:
+            time.sleep(0.2)
 
     def _handle_key(self, ch):
         if ch in KEY_MAPPINGS:

@@ -27,7 +27,7 @@ logging:
 
 voice:
   enabled: true
-  wake_word: "hey pip"
+  wake_word: "hello"
   wake_mode: "auto"
   wake_keyword: "computer"
   porcupine_access_key: ""
