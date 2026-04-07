@@ -7,17 +7,13 @@ import tempfile
 import threading
 import time
 
+from core.platform_utils import resolve_executable
+
 logger = logging.getLogger(__name__)
 
-# Try to import piper; fallback to print
-try:
-    # Piper is command-line tool; we'll use subprocess
-    import piper  # noqa: F401
-
-    PIPER_AVAILABLE = True
-except ImportError:
-    PIPER_AVAILABLE = False
-    logger.warning("Piper not installed; TTS will print text to terminal")
+# Piper is a command-line tool; the runtime check happens against the executable
+# path so we can support platform-specific installs and custom paths.
+PIPER_AVAILABLE = True
 
 
 class TextToSpeech:
@@ -85,7 +81,7 @@ class TextToSpeech:
             try:
                 text, speed = self._queue.get(timeout=0.1)
                 self._publish_state("speaking", text)
-                if PIPER_AVAILABLE:
+                if self._piper_is_available():
                     self._speak_piper(text, speed)
                 else:
                     self._print_text(text)
@@ -101,22 +97,22 @@ class TextToSpeech:
         # We'll use a temporary file for audio and play with aplay/afplay.
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             audio_file = f.name
-        cmd = [self.piper_path, "--model", self.voice_model, "--output_file", audio_file]
+        piper_executable = resolve_executable(self.piper_path)
+        if not piper_executable:
+            raise FileNotFoundError(f"Piper executable not found: {self.piper_path}")
+
+        cmd = [piper_executable, "--model", self.voice_model, "--output_file", audio_file]
         # Speed is not directly supported by piper; we could use sox or adjust playback.
         # For simplicity, we'll just pass text.
         try:
-            subprocess.run(cmd, input=text.encode(), capture_output=True, check=True)
+            subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True, check=True)
             # Play audio
-            if sys.platform == "darwin":
-                self._play_audio_process(["afplay", audio_file])
-            elif sys.platform.startswith("linux"):
-                self._play_audio_process(["aplay", audio_file])
-            elif sys.platform == "win32":
+            if os.name == "nt":
                 import winsound
 
                 winsound.PlaySound(audio_file, winsound.SND_FILENAME)
             else:
-                logger.warning("Unsupported platform for audio playback")
+                self._play_audio_file(audio_file)
         except Exception as e:
             logger.warning(f"Piper execution error, falling back to terminal output: {e}")
             self._print_text(text)
@@ -124,10 +120,19 @@ class TextToSpeech:
             if os.path.exists(audio_file):
                 os.unlink(audio_file)
 
+    def _piper_is_available(self):
+        if not PIPER_AVAILABLE:
+            return False
+        return resolve_executable(self.piper_path) is not None
+
     def _print_text(self, text):
         print(f"\n[E-Pet says]: {text}")
 
     def _play_audio_process(self, cmd):
+        player = resolve_executable(cmd[0])
+        if not player:
+            raise FileNotFoundError(f"Audio player not found: {cmd[0]}")
+        cmd = [player, *cmd[1:]]
         with self._play_lock:
             self._current_process = subprocess.Popen(cmd)
         try:
@@ -146,6 +151,28 @@ class TextToSpeech:
                 process.wait(timeout=1)
             except Exception:
                 process.kill()
+
+    def _play_audio_file(self, audio_file):
+        for candidate in self._audio_player_candidates():
+            player = resolve_executable(candidate[0])
+            if not player:
+                continue
+            try:
+                self._play_audio_process([player, *candidate[1:], audio_file])
+                return
+            except Exception as e:
+                logger.debug(f"Audio player {candidate[0]} failed: {e}")
+        raise FileNotFoundError("No supported audio playback command was found")
+
+    @staticmethod
+    def _audio_player_candidates():
+        if sys.platform == "darwin":
+            return [["afplay"]]
+        return [
+            ["aplay"],
+            ["paplay"],
+            ["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet"],
+        ]
 
     def _clear_queue(self):
         while not self._queue.empty():

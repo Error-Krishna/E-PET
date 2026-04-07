@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 import threading
+from pathlib import Path
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -8,6 +9,10 @@ logger = logging.getLogger(__name__)
 class Memory:
     """SQLite-backed memory system with key-value store, event log, and categorized memories."""
     def __init__(self, db_path: str = "epet.db"):
+        if db_path != ":memory:":
+            path = Path(db_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            db_path = str(path)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
         self._init_db()
