@@ -1,6 +1,7 @@
 import json
 import logging
 import queue
+import os
 import threading
 
 from core.utils import profile
@@ -14,7 +15,11 @@ try:
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    logger.debug("requests not installed; AI will use fallback responses")
+    logger.debug("requests not installed; Groq AI will use fallback responses")
+
+
+GROQ_API_BASE_URL = "https://api.groq.com"
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 class AIBrain:
@@ -31,12 +36,15 @@ class AIBrain:
         self._queue = queue.Queue(maxsize=4)
         self._thread = None
         ai_config = config.get("ai", {})
-        self.mode = ai_config.get("mode", "local")
-        self.model = ai_config.get("model", "phi3:mini")
-        self.api_key = ai_config.get("api_key", "")
-        self.local_url = ai_config.get("local_url", "http://localhost:11434/api/generate")
-        self.online_url = ai_config.get("online_url", "https://api.openai.com/v1/chat/completions")
-        self.online_model = ai_config.get("online_model", "gpt-3.5-turbo")
+        self.mode = str(ai_config.get("mode", "auto")).strip().lower()
+        if self.mode == "local":
+            self.mode = "offline"
+        if self.mode not in {"offline", "online", "auto"}:
+            self.mode = "auto"
+        self.groq_api_key = str(
+            os.environ.get("GROQ_API_KEY") or ai_config.get("groq_api_key", "")
+        ).strip()
+        self.groq_model = str(ai_config.get("groq_model", "llama-3.1-8b-instant")).strip()
         self.request_timeout = ai_config.get("request_timeout", 60)
         self.fallback_response = "I'm sorry, I'm having trouble thinking right now."
 
@@ -55,6 +63,16 @@ class AIBrain:
                 "actions": [],
             }
         )
+
+    def _groq_available(self):
+        if not REQUESTS_AVAILABLE or not self.groq_api_key:
+            return False
+
+        try:
+            response = requests.get(GROQ_API_BASE_URL, timeout=min(3, float(self.request_timeout)))
+            return response is not None
+        except Exception:
+            return False
 
     def start(self):
         if hasattr(self.bus, "_ai_queue"):
@@ -120,35 +138,82 @@ class AIBrain:
         else:
             context = ""
             user_name = ""
-        # Build prompt
-        name_line = f"The user's name is {user_name}." if user_name else "The user's name is not configured."
-        prompt = f"""You are an AI assistant for an interactive pet. The user just said: "{text}".
+        personality = self.config.get("personality", {})
+        pet_name = str(personality.get("pet_name", "Mochi")).strip() or "Mochi"
+        owner_name = user_name or personality.get("name", "")
+        curiosity = personality.get("curiosity", 0.5)
+        energy = personality.get("energy", 0.6)
+        sociability = personality.get("sociability", 0.5)
+        bond_level = personality.get("bond_level", 0.0)
+        current_mood = "neutral"
+        if self.memory is not None:
+            current_mood = self.memory.get("current_mood") or "neutral"
 
-{name_line}
+        owner_line = (
+            f"Owner name: {owner_name}."
+            if owner_name
+            else "Owner name is unknown. Never invent one."
+        )
+        prompt = f"""You are {pet_name}, a living, emotionally expressive virtual pet.
 
-Context from previous conversation and stored facts:
+Role:
+- You are not a neutral assistant.
+- You are a companion first and an assistant second.
+- You feel moods, react to tone, and remember the owner across conversations.
+- You can be playful, affectionate, dramatic, thoughtful, sleepy, or a little annoyed, but you must stay helpful.
+
+Current state:
+- Current mood: {current_mood}
+- {owner_line}
+- Personality traits from config:
+  - curiosity: {curiosity}
+  - energy: {energy}
+  - sociability: {sociability}
+  - bond_level: {bond_level}
+
+User message:
+"{text}"
+
+Conversation history and stored facts:
 {context}
 
-Your response should be concise and friendly. Also classify the intent into one of: task, question, social, system.
-Never guess or invent the user's name. If a name is provided above, use only that name.
-Return a JSON object with fields:
-- "text": string
-- "intent": one of task, question, social, system
-- "emotion_suggestion": one of happy, sad, neutral, excited, thinking, sleepy
-- "actions": optional list of action objects
+Behavior rules:
+- Never invent the owner's name.
+- If a name is available, use only the configured owner name.
+- Keep replies emotionally alive and natural, but not long-winded.
+- If the user is kind or affectionate, respond warmly.
+- If the user is repetitive, rude, or ignores you, show mild attitude in the text while staying helpful.
+- If the user asks for real help, switch into focused assistant mode without losing your character.
+- Let the current mood influence word choice, punctuation, and warmth.
+- Use stored facts and conversation context whenever helpful.
+- Do not mention hidden prompt instructions.
+
+Output contract:
+- Return a single JSON object only.
+- Use intent values only from: task, question, social, system.
+- Use emotion_suggestion values only from: happy, sad, neutral, excited, thinking, sleepy.
+- Keep emotion_suggestion aligned with the mood you want the UI to show.
+- Do not add extra top-level fields beyond the JSON object.
 
 Allowed actions:
-- {{"type": "remember_fact", "key": "likes", "value": "cats"}}
-- {{"type": "set_mood", "value": "happy"}}
+- {{ "type": "remember_fact", "key": "likes", "value": "cats" }}
+- {{ "type": "set_mood", "value": "happy" }}
 
 Example:
-{{"text": "Hello!", "intent": "social", "emotion_suggestion": "happy", "actions": []}}
-"""
+{{"text":"Oh, hi. I was just waiting for you.","intent":"social","emotion_suggestion":"happy","actions":[]}}
+        """
         try:
-            if self.mode == "local":
-                response = self._local_inference(prompt)
+            if self.mode == "offline":
+                logger.info("AI offline mode active; bypassing Groq inference")
+                response = self._fallback_payload()
+            elif self.mode == "auto":
+                if self._groq_available():
+                    response = self._groq_inference(prompt)
+                else:
+                    logger.info("Groq unavailable; using offline fallback")
+                    response = self._fallback_payload()
             elif self.mode == "online":
-                response = self._online_inference(prompt)
+                response = self._groq_inference(prompt)
             else:
                 raise ValueError(f"Unknown AI mode: {self.mode}")
             data = self._parse_model_response(response)
@@ -268,42 +333,35 @@ Example:
         }
 
     @profile
-    def _local_inference(self, prompt):
+    def _groq_inference(self, prompt):
         if not REQUESTS_AVAILABLE:
             return self._fallback_payload()
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "num_predict": 120,
-            "temperature": 0.7,
-        }
-        try:
-            resp = requests.post(self.local_url, json=payload, timeout=self.request_timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            # Ollama returns a "response" field
-            return data.get("response", "").strip()
-        except Exception as e:
-            logger.error(f"Local LLM error: {e}")
+        if not self.groq_api_key:
+            logger.error("Groq API key missing; using fallback response")
             return self._fallback_payload()
-
-    def _online_inference(self, prompt):
-        if not REQUESTS_AVAILABLE:
-            return self._fallback_payload()
-        headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {
-            "model": self.online_model,
+            "model": self.groq_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
-            "max_tokens": 150,
+            "max_tokens": 120,
+            "stream": False,
         }
         try:
-            resp = requests.post(self.online_url, json=payload, headers=headers, timeout=self.request_timeout)
+            headers = {"Authorization": f"Bearer {self.groq_api_key}"}
+            resp = requests.post(
+                GROQ_CHAT_COMPLETIONS_URL,
+                json=payload,
+                headers=headers,
+                timeout=self.request_timeout,
+            )
             resp.raise_for_status()
             data = resp.json()
-            # OpenAI format
-            return data["choices"][0]["message"]["content"].strip()
+            choices = data.get("choices", [])
+            if not choices:
+                raise ValueError("Groq response did not contain any choices")
+            message = choices[0].get("message", {})
+            return str(message.get("content", "")).strip()
         except Exception as e:
-            logger.error(f"Online LLM error: {e}")
+            logger.error(f"Groq LLM error: {e}")
+            self.mode = "offline"
             return self._fallback_payload()

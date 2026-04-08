@@ -14,6 +14,7 @@ simulator:
   fps: 10               # not used now, but keep
 
 personality:
+  pet_name: "mochi"
   curiosity: 0.5
   energy: 0.6
   sociability: 0.5
@@ -43,12 +44,9 @@ voice:
 
 ai:
   enabled: true
-  mode: local
-  model: "phi3:latest"
-  api_key: ""
-  local_url: "http://localhost:11434/api/generate"
-  online_url: "https://api.openai.com/v1/chat/completions"
-  online_model: "gpt-3.5-turbo"
+  mode: auto
+  groq_api_key: ""
+  groq_model: "llama-3.1-8b-instant"
   request_timeout: 60
 
 memory:

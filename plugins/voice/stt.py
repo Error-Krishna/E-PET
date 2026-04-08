@@ -127,7 +127,9 @@ class SpeechToText:
             try:
                 text = sys.stdin.readline().strip()
                 if text:
-                    self.bus.publish("pet/input/speech", {"text": text, "confidence": 1.0})
+                    transcript_payload = {"text": text, "confidence": 1.0, "source": "keyboard"}
+                    self.bus.publish("pet/input/speech", transcript_payload)
+                    self.bus.publish("pet/voice/transcript", transcript_payload)
             except Exception as e:
                 logger.error(f"Error in keyboard fallback: {e}")
 
@@ -186,9 +188,14 @@ class SpeechToText:
                 text = self.transcribe(f.name)
                 if text:
                     logger.info(f"STT: '{text}'")
+                    transcript_payload = {"text": text, "confidence": 1.0, "source": "microphone"}
                     self.bus.publish(
                         "pet/input/speech",
-                        {"text": text, "confidence": 1.0},
+                        transcript_payload,
+                    )
+                    self.bus.publish(
+                        "pet/voice/transcript",
+                        transcript_payload,
                     )
                 else:
                     logger.debug("STT: no speech detected")

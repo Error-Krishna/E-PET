@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
         "fps": 10,
     },
     "personality": {
+        "pet_name": "Mochi",
         "curiosity": 0.5,
         "energy": 0.6,
         "sociability": 0.5,
@@ -45,12 +46,9 @@ DEFAULT_CONFIG = {
     },
     "ai": {
         "enabled": True,
-        "mode": "local",
-        "model": "phi3:mini",
-        "api_key": "",
-        "local_url": "http://localhost:11434/api/generate",
-        "online_url": "https://api.openai.com/v1/chat/completions",
-        "online_model": "gpt-3.5-turbo",
+        "mode": "auto",
+        "groq_api_key": "",
+        "groq_model": "llama-3.1-8b-instant",
         "request_timeout": 60,
     },
     "memory": {
@@ -94,5 +92,15 @@ def normalize_and_validate_config(raw_config):
     config["voice"]["wake_check_interval"] = max(0.1, float(config["voice"]["wake_check_interval"]))
     config["voice"]["wake_cooldown_seconds"] = max(0.5, float(config["voice"]["wake_cooldown_seconds"]))
     config["ai"]["request_timeout"] = max(5, int(config["ai"]["request_timeout"]))
+    config["personality"]["pet_name"] = str(config["personality"].get("pet_name", "Mochi")).strip() or "Mochi"
+    ai_mode = str(config["ai"].get("mode", "offline")).strip().lower()
+    if ai_mode == "local":
+        ai_mode = "offline"
+    if ai_mode not in {"offline", "online", "auto"}:
+        ai_mode = "auto"
+    config["ai"]["mode"] = ai_mode
+    config["ai"]["groq_api_key"] = str(config["ai"].get("groq_api_key", "")).strip()
+    groq_model = str(config["ai"].get("groq_model", "llama-3.1-8b-instant")).strip()
+    config["ai"]["groq_model"] = groq_model or "llama-3.1-8b-instant"
 
     return config

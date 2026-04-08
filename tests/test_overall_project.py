@@ -50,6 +50,7 @@ class BaseOverallTest(unittest.TestCase):
             {
                 "plugins": {"enabled": ["emotion", "sound", "idle", "voice", "ai"]},
                 "personality": {
+                    "pet_name": "Mochi",
                     "curiosity": 0.5,
                     "energy": 0.6,
                     "sociability": 0.5,
@@ -72,12 +73,9 @@ class BaseOverallTest(unittest.TestCase):
                 },
                 "ai": {
                     "enabled": True,
-                    "mode": "local",
-                    "model": "phi3:latest",
-                    "api_key": "",
-                    "local_url": "http://localhost:11434/api/generate",
-                    "online_url": "https://api.openai.com/v1/chat/completions",
-                    "online_model": "gpt-3.5-turbo",
+                    "mode": "online",
+                    "groq_api_key": "test-groq-key",
+                    "groq_model": "llama-3.1-8b-instant",
                     "request_timeout": 60,
                 },
                 "memory": {"max_history": 20, "persist_history": True, "extract_facts": True},
@@ -100,7 +98,9 @@ class BaseOverallTest(unittest.TestCase):
 class TestConfigAndPlatform(BaseOverallTest):
     def test_default_config_values_exist(self):
         self.assertEqual(DEFAULT_CONFIG["personality"]["name"], "krishna")
-        self.assertEqual(DEFAULT_CONFIG["ai"]["model"], "phi3:mini")
+        self.assertEqual(DEFAULT_CONFIG["personality"]["pet_name"], "Mochi")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["mode"], "auto")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["groq_model"], "llama-3.1-8b-instant")
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
 
     def test_config_validation_normalizes_and_clamps(self):
@@ -614,11 +614,13 @@ class TestAIAndVoiceStack(BaseOverallTest):
         finally:
             reloaded.stop()
 
-    def test_ai_brain_local_payload_uses_configured_model_and_limits_output(self):
+    def test_ai_brain_groq_payload_uses_configured_model_and_limits_output(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
         fake_response = mock.Mock()
         fake_response.raise_for_status.return_value = None
-        fake_response.json.return_value = {"response": '{"text":"ok"}'}
+        fake_response.json.return_value = {
+            "choices": [{"message": {"content": '{"text":"ok"}'}}]
+        }
         captured = {}
 
         def fake_post(url, **kwargs):
@@ -627,21 +629,75 @@ class TestAIAndVoiceStack(BaseOverallTest):
             return fake_response
 
         with mock.patch.object(brain_module.requests, "post", side_effect=fake_post):
-            result = brain._local_inference("hello")
+            result = brain._groq_inference("hello")
 
         self.assertEqual(result, '{"text":"ok"}')
-        self.assertEqual(captured["url"], self.config["ai"]["local_url"])
+        self.assertEqual(captured["url"], brain_module.GROQ_CHAT_COMPLETIONS_URL)
         payload = captured["kwargs"]["json"]
-        self.assertEqual(payload["model"], "phi3:latest")
-        self.assertEqual(payload["num_predict"], 120)
+        self.assertEqual(payload["model"], self.config["ai"]["groq_model"])
+        self.assertEqual(payload["max_tokens"], 120)
         self.assertFalse(payload["stream"])
         self.assertIn("temperature", payload)
+        self.assertEqual(captured["kwargs"]["headers"]["Authorization"], "Bearer test-groq-key")
+
+    def test_ai_brain_offline_mode_bypasses_network_calls(self):
+        offline_config = json.loads(json.dumps(self.config))
+        offline_config["ai"]["mode"] = "offline"
+        brain = AIBrain(self.bus, self.hal, self.memory, offline_config)
+        events = []
+        self.bus.subscribe("pet/ai/response", lambda topic, data: events.append(data))
+        with mock.patch.object(brain_module.requests, "post") as mocked_post:
+            brain._process_ai_request("hello")
+            self.wait(0.3)
+        mocked_post.assert_not_called()
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["intent"], "system")
+        self.assertEqual(events[-1]["emotion_suggestion"], "neutral")
+
+    def test_ai_brain_auto_mode_uses_groq_when_available(self):
+        auto_config = json.loads(json.dumps(self.config))
+        auto_config["ai"]["mode"] = "auto"
+        brain = AIBrain(self.bus, self.hal, self.memory, auto_config)
+        with mock.patch.object(brain, "_groq_available", return_value=True), \
+             mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok"}') as groq_call:
+            brain._process_ai_request("hello")
+            self.wait(0.3)
+        groq_call.assert_called_once()
+
+    def test_ai_brain_auto_mode_falls_back_when_groq_unavailable(self):
+        auto_config = json.loads(json.dumps(self.config))
+        auto_config["ai"]["mode"] = "auto"
+        brain = AIBrain(self.bus, self.hal, self.memory, auto_config)
+        events = []
+        self.bus.subscribe("pet/ai/response", lambda topic, data: events.append(data))
+        with mock.patch.object(brain, "_groq_available", return_value=False), \
+             mock.patch.object(brain, "_groq_inference") as groq_call:
+            brain._process_ai_request("hello")
+            self.wait(0.3)
+        groq_call.assert_not_called()
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["intent"], "system")
+        self.assertEqual(events[-1]["emotion_suggestion"], "neutral")
+
+    def test_ai_brain_prefers_environment_api_key(self):
+        env_config = json.loads(json.dumps(self.config))
+        env_config["ai"]["groq_api_key"] = ""
+        with mock.patch.dict(os.environ, {"GROQ_API_KEY": "env-groq-key"}, clear=False):
+            brain = AIBrain(self.bus, self.hal, self.memory, env_config)
+        self.assertEqual(brain.groq_api_key, "env-groq-key")
+
+    def test_ai_brain_uses_configured_pet_name_in_prompt(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        with mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok"}') as groq_call:
+            brain._process_ai_request("hello")
+        prompt = groq_call.call_args.args[0]
+        self.assertIn("You are Mochi", prompt)
 
     def test_ai_brain_invalid_json_falls_back(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
         events = []
         self.bus.subscribe("pet/ai/response", lambda topic, data: events.append(data))
-        with mock.patch.object(brain, "_local_inference", return_value="not-json"):
+        with mock.patch.object(brain, "_groq_inference", return_value="not-json"):
             brain._process_ai_request("hello")
             self.wait(0.3)
         self.assertGreaterEqual(len(events), 1)
@@ -660,7 +716,7 @@ class TestAIAndVoiceStack(BaseOverallTest):
             '"actions":[{"type":"remember_fact","key":"name","value":"Krishna"},'
             '{"type":"set_mood","value":"curious"},{"type":"unsupported"}]}'
         )
-        with mock.patch.object(brain, "_local_inference", return_value=payload):
+        with mock.patch.object(brain, "_groq_inference", return_value=payload):
             brain._process_ai_request("hello")
             self.wait(0.3)
         self.assertGreaterEqual(len(responses), 1)
@@ -676,7 +732,7 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.bus.subscribe("pet/speak/say", lambda topic, data: speaks.append(data))
         with mock.patch.object(
             brain,
-            "_local_inference",
+            "_groq_inference",
             return_value='{"text":"How are you?","intent":"question","emotion_suggestion":"thinking"}',
         ):
             brain._process_ai_request("hello")
@@ -791,6 +847,32 @@ class TestAIAndVoiceStack(BaseOverallTest):
         finally:
             os.unlink(path)
             stt.stop()
+
+    def test_stt_emits_transcript_event(self):
+        fake_model = mock.Mock()
+        fake_model.transcribe.return_value = ([SimpleNamespace(text="hello gui")], None)
+        fake_recorder = mock.Mock(frame_length=1024)
+        fake_recorder.start.return_value = None
+        fake_recorder.stop.return_value = None
+        fake_recorder.delete.return_value = None
+        fake_recorder.read.return_value = [0] * 1024
+        with mock.patch.object(stt_module, "WHISPER_AVAILABLE", True), \
+             mock.patch.object(stt_module, "WhisperModel", return_value=fake_model), \
+             mock.patch.object(stt_module, "PvRecorder", return_value=fake_recorder), \
+             mock.patch.object(stt_module, "pyaudio", None):
+            stt = SpeechToText(self.bus, self.hal, self.memory, self.config)
+
+        events = []
+        self.bus.subscribe("pet/voice/transcript", lambda topic, data: events.append(data))
+        try:
+            stt._record_and_transcribe()
+            self.wait(0.2)
+        finally:
+            stt.stop()
+
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["text"], "hello gui")
+        self.assertEqual(events[-1]["source"], "microphone")
 
     def test_wake_mode_selects_whisper_without_porcupine(self):
         fake_recorder = mock.Mock(frame_length=1024)
