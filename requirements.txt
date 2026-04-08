@@ -4,6 +4,7 @@ numpy>=1.26
 pygame>=2.6
 requests>=2.31
 faster-whisper>=1.2.1
+groq>=0.20
 pvrecorder>=1.2.4
 pyttsx3>=2.90
 

@@ -1,4 +1,6 @@
+import argparse
 import logging
+import multiprocessing as mp
 import warnings
 import yaml
 import time
@@ -11,13 +13,15 @@ from core.hal import HALSimulator
 from core.memory import Memory
 from core.platform_utils import get_config_path, get_database_path
 from core.plugin_loader import PluginLoader
+from simulator.conversation_bridge import ConversationBridge
 from simulator.face_renderer import SimpleRenderer as FaceRenderer
+from simulator.conversation_window import run_conversation_window
 from simulator.input_sim import InputSimulator
 
 def setup_logging(level):
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname).1s | %(name)s | %(message)s",
+        format="%(asctime)s | E-Pet | %(levelname).1s | %(name)s | %(message)s",
         datefmt="%H:%M:%S",
         force=True,
     )
@@ -35,6 +39,10 @@ def setup_logging(level):
     warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 
 def main():
+    parser = argparse.ArgumentParser(description="Run the E-Pet backend")
+    parser.add_argument("--headless", action="store_true", help="Disable the terminal renderer and keyboard simulator")
+    args = parser.parse_args()
+
     # Load config
     try:
         config_path = get_config_path()
@@ -48,56 +56,97 @@ def main():
     log_level = config.get("logging", {}).get("level", "INFO")
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
-    logger.info("Config loaded")
+    logger.info("Boot | config loaded")
 
-    logger.info("Starting event bus")
+    logger.info("Boot | starting event bus")
     bus = EventBus()
-    logger.info("Event bus ready")
+    logger.info("Boot | event bus ready")
 
     hal_mode = config.get("hardware", {}).get("mode", "simulator")
     hal_debug = config.get("hardware", {}).get("debug", False)
     if hal_mode != "simulator":
-        logger.info("Hardware mode '%s' not supported; using simulator", hal_mode)
-    logger.info("Starting HAL simulator")
+        logger.info("Boot | hardware mode '%s' not supported; using simulator", hal_mode)
+    logger.info("Boot | starting HAL simulator")
     hal = HALSimulator(debug=hal_debug)
-    logger.info("HAL ready")
+    logger.info("Boot | HAL ready")
 
-    logger.info("Opening memory store")
+    logger.info("Boot | opening memory store")
     memory = Memory(get_database_path())
-    logger.info("Memory ready")
+    logger.info("Boot | memory ready")
 
     enabled_plugins = config.get("plugins", {}).get("enabled", [])
-    logger.info("Loading plugins: %s", ", ".join(enabled_plugins) if enabled_plugins else "none")
+    logger.info("Boot | loading plugins: %s", ", ".join(enabled_plugins) if enabled_plugins else "none")
     loader = PluginLoader(enabled_plugins, bus, hal, memory, config)
     loader.load_plugins()
-    logger.info("Plugins ready")
+    logger.info("Boot | plugins ready")
 
-    logger.info("Starting terminal renderer")
-    face_renderer = FaceRenderer(bus, hal, memory, config)
-    face_renderer.start()
-    logger.info("Starting keyboard input")
-    input_sim = InputSimulator(bus)
-    input_sim.start()
+    face_renderer = None
+    face_window = None
+    conversation_process = None
+    conversation_bridge = None
+    mp_ctx = mp.get_context("spawn")
+    input_sim = None
+    if args.headless:
+        logger.info("Runtime | headless mode enabled")
+    else:
+        try:
+            from simulator.face_window import FaceWindow
+
+            logger.info("Runtime | starting face window")
+            face_window = FaceWindow(bus, hal, memory, config)
+            logger.info("Runtime | starting temporary conversation window")
+            conversation_queue = mp_ctx.Queue(maxsize=128)
+            conversation_bridge = ConversationBridge(conversation_queue)
+            conversation_bridge.bind(bus)
+            conversation_process = mp_ctx.Process(
+                target=run_conversation_window,
+                args=(conversation_queue,),
+                daemon=True,
+            )
+            conversation_process.start()
+        except Exception as e:
+            logger.warning("Runtime | face window unavailable, using terminal renderer: %s", e)
+            logger.info("Runtime | starting terminal renderer")
+            face_renderer = FaceRenderer(bus, hal, memory, config)
+            face_renderer.start()
+
+        logger.info("Runtime | starting keyboard input")
+        input_sim = InputSimulator(bus)
+        input_sim.start()
 
     bus.publish("pet/sound/play", {"name": "startup"})
 
-    logger.info("Runtime active. Press q to quit.")
+    logger.info("Runtime | active (press q or close the window to quit)")
     try:
-        quit_event = threading.Event()
+        if face_window is not None:
+            face_window.run()
+        else:
+            quit_event = threading.Event()
 
-        def on_quit(topic, data):
-            logger.info("Shutdown requested")
-            quit_event.set()
+            def on_quit(topic, data):
+                logger.info("Runtime | shutdown requested")
+                quit_event.set()
 
-        bus.subscribe("pet/system/quit", on_quit)
+            bus.subscribe("pet/system/quit", on_quit)
 
-        quit_event.wait()
+            quit_event.wait()
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
+        logger.info("Runtime | keyboard interrupt received")
     finally:
-        logger.info("Stopping runtime")
-        face_renderer.stop()
-        input_sim.stop()
+        logger.info("Runtime | stopping")
+        if face_window is not None:
+            face_window.stop()
+        if conversation_bridge is not None:
+            try:
+                conversation_bridge._enqueue("quit", {})
+            except Exception:
+                pass
+        if conversation_process is not None:
+            conversation_process.join(timeout=1)
+        if face_renderer is not None:
+            face_renderer.stop()
+        if input_sim is not None:
+            input_sim.stop()
         for engine in [
             '_emotion_engine',
             '_sound_engine',
@@ -114,7 +163,7 @@ def main():
         time.sleep(0.3)
         bus.shutdown()
         memory.close()
-        logger.info("Goodbye")
+        logger.info("Runtime | goodbye")
 
 if __name__ == "__main__":
     main()

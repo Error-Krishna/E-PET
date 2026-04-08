@@ -1,6 +1,6 @@
 # E-Pet
 
-E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, idle behavior, sound synthesis, terminal rendering, voice input, local/online AI reasoning, and local TTS into one event-driven system.
+E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, idle behavior, sound synthesis, a simple face window, voice input, and Groq-powered AI reasoning into one event-driven system.
 
 ## Current Features
 
@@ -8,10 +8,11 @@ E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, 
 - Emotion engine with persistent mood state
 - Idle decay into bored/sleepy
 - Procedural sound synthesis with pygame
-- Terminal renderer for current mood
+- Minimal GUI face window for current mood
+- Temporary plain-text conversation window for testing
 - Wake trigger via Whisper phrase detection and keyboard fallback
 - Speech-to-text via faster-whisper with microphone input
-- Local AI reasoning via Ollama-compatible API
+- Groq Cloud AI reasoning in online mode
 - AI-driven emotion suggestions
 - Text-to-speech via pyttsx3 with Piper support when available
 - Persistent facts and conversation history in SQLite
@@ -36,12 +37,6 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-If you want Porcupine wake words or Piper-backed TTS, you can also install:
-
-```bash
-python -m pip install pyaudio pvporcupine piper-tts
-```
-
 ### Windows
 
 ```powershell
@@ -49,14 +44,6 @@ python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
 ```
-
-If you want Porcupine wake words or Piper-backed TTS, you can also install:
-
-```powershell
-python -m pip install pvporcupine piper-tts
-```
-
-If you choose to use `pyaudio` on Windows, install it only if your environment supports the wheel or build prerequisites.
 
 ### Linux
 
@@ -66,16 +53,18 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-If you want Porcupine wake words or Piper-backed TTS, you can also install:
-
-```bash
-python -m pip install pyaudio pvporcupine piper-tts
-```
-
 ## Run
 
 ```bash
 python main.py
+```
+
+This opens the small face window automatically, keeps logs in your terminal, and also opens the temporary plain-text conversation window for testing.
+
+Optional headless mode:
+
+```bash
+python main.py --headless
 ```
 
 On first run, `faster-whisper` may download the selected model. After that, startup is faster because the model is cached locally.
@@ -152,19 +141,26 @@ Important voice notes:
 
 ## AI Setup
 
-For local AI mode, configure:
-- `ai.mode: local`
-- `ai.model: "phi3:latest"` or the Ollama model you actually have installed
-- `ai.local_url`
+E-Pet now uses a single Groq Cloud online path for model-backed responses.
 
-The app sends prompts to an Ollama-compatible endpoint at `http://localhost:11434/api/generate`.
+Configure:
+- `ai.mode: auto` to let E-Pet choose Groq when reachable and fall back offline when not
+- `ai.mode: online` if you want it to try Groq every time and still fall back on failure
+- `ai.mode: offline` if you want no network calls at all
+- `GROQ_API_KEY` environment variable, or `ai.groq_api_key` as a local fallback
+- `ai.groq_model: "llama-3.1-8b-instant"`
 
-Make sure Ollama is running and the model exists locally:
+If you want the pet to run fully offline, set:
+- `ai.mode: offline`
 
-```bash
-ollama list
-ollama pull phi3:latest
-```
+In offline mode, no network call is made and the AI response falls back immediately, while the rest of the pet still runs normally.
+In auto mode, the app checks Groq reachability first and stays offline if it cannot connect.
+
+The recommended low-latency model for this project is:
+- `llama-3.1-8b-instant`
+
+Groq uses an OpenAI-compatible chat-completions API, so the prompt-and-response flow stays simple and fast.
+For secrets, prefer setting `GROQ_API_KEY` in your shell or launcher rather than storing the key in `config.yaml`.
 
 ## Config
 
@@ -172,10 +168,15 @@ Recommended config values for a fresh clone:
 
 - `hardware.mode: simulator`
 - `plugins.enabled`: keep `emotion`, `sound`, `idle`, `voice`, `ai`
+- `personality.pet_name`: change the pet's name here
 - `personality.name`: set your actual name
 - `voice.wake_mode: whisper` if you do not have a Porcupine access key
 - `voice.tts_model`: absolute path to your Piper voice model
-- `ai.model`: a model you have pulled in Ollama
+- `ai.mode`: `auto` is the safest default for automatic online/offline switching
+- `ai.mode`: `online` if you always want the app to try Groq first
+- `ai.mode`: `offline` for no-network fallback
+- `ai.groq_api_key`: leave blank if you are using `GROQ_API_KEY`
+- `ai.groq_model`: keep the default unless you want to try another Groq model
 
 The default `config.yaml` is designed to run without hardware, using the simulator and the voice fallbacks.
 
@@ -187,6 +188,7 @@ Core dependencies in `requirements.txt`:
 - `pygame`
 - `requests`
 - `faster-whisper`
+- `groq`
 - `pvrecorder`
 - `pyttsx3`
 
@@ -214,3 +216,4 @@ python -m unittest tests.test_overall_project
 - Keyboard fallback wake and speech flows are intended for development/testing.
 - Local AI and TTS performance depends heavily on machine resources and model size.
 - First launch may take longer while Whisper models are downloaded and cached.
+- The temporary plain-text conversation window is only for testing and can be removed later without affecting the face window.
