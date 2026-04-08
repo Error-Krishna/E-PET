@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import time
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -27,6 +28,11 @@ from plugins.ai.brain import AIBrain
 from plugins.ai.memory_manager import MemoryManager
 from plugins.emotion.engine import EmotionEngine, MOODS, TOUCH_MOOD
 from plugins.idle.engine import IdleTick
+from plugins.os_bridge import executor as os_bridge_executor_module
+from plugins.os_bridge import plugin as os_bridge_plugin
+from plugins.os_bridge.actions import apps as os_bridge_apps_module
+from plugins.os_bridge.actions import keyboard as os_bridge_keyboard_module
+from plugins.os_bridge.executor import OSBridgeExecutor
 from plugins.sound.engine import SoundEngine
 from plugins.voice import plugin as voice_plugin
 from plugins.voice import stt as stt_module
@@ -101,6 +107,7 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(DEFAULT_CONFIG["personality"]["pet_name"], "Mochi")
         self.assertEqual(DEFAULT_CONFIG["ai"]["mode"], "auto")
         self.assertEqual(DEFAULT_CONFIG["ai"]["groq_model"], "llama-3.1-8b-instant")
+        self.assertTrue(DEFAULT_CONFIG["event_bus"]["ordered"])
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
 
     def test_config_validation_normalizes_and_clamps(self):
@@ -142,7 +149,8 @@ class TestConfigAndPlatform(BaseOverallTest):
             calls.append(value)
             return value + 1
 
-        with mock.patch("builtins.print") as mocked_print:
+        with mock.patch.dict(os.environ, {"EPET_PROFILE": "1"}, clear=False), \
+             mock.patch("builtins.print") as mocked_print:
             self.assertEqual(_sample(2), 3)
             mocked_print.assert_called_once()
         self.assertEqual(calls, [2])
@@ -212,6 +220,73 @@ class TestEventBusAndMemory(BaseOverallTest):
 
     def test_shutdown_does_not_raise(self):
         self.bus.shutdown()
+
+    def test_ordered_bus_preserves_publish_order_and_adds_metadata(self):
+        ordered_bus = EventBus({"event_bus": {"ordered": True}})
+        received = []
+        ordered_bus.subscribe("pet/emotion/*", lambda topic, data: received.append(data))
+        try:
+            ordered_bus.publish("pet/emotion/one", {"n": 1})
+            ordered_bus.publish("pet/emotion/two", {"n": 2})
+            ordered_bus.publish("pet/emotion/three", {"n": 3})
+            self.wait(0.5)
+        finally:
+            ordered_bus.shutdown()
+        self.assertEqual([item["data"]["n"] for item in received], [1, 2, 3])
+        self.assertEqual([item["seq"] for item in received], sorted(item["seq"] for item in received))
+        self.assertTrue(all("timestamp" in item for item in received))
+        self.assertTrue(all(item["topic"].startswith("pet/emotion/") for item in received))
+
+    def test_ordered_bus_allows_parallel_cross_domain_processing(self):
+        ordered_bus = EventBus({"event_bus": {"ordered": True}})
+        start_times = {}
+        done = threading.Event()
+
+        def make_handler(name):
+            def _handler(topic, data):
+                start_times[name] = time.time()
+                time.sleep(0.2)
+                if len(start_times) == 2:
+                    done.set()
+            return _handler
+
+        ordered_bus.subscribe("pet/voice/*", make_handler("voice"))
+        ordered_bus.subscribe("pet/ai/*", make_handler("ai"))
+        try:
+            start = time.time()
+            ordered_bus.publish("pet/voice/test", {"text": "one"})
+            ordered_bus.publish("pet/ai/test", {"text": "two"})
+            self.assertTrue(done.wait(1.0))
+            elapsed = time.time() - start
+        finally:
+            ordered_bus.shutdown()
+        self.assertLess(elapsed, 0.35)
+        self.assertIn("voice", start_times)
+        self.assertIn("ai", start_times)
+
+    def test_ordered_bus_handler_can_offload_slow_work(self):
+        ordered_bus = EventBus({"event_bus": {"ordered": True}})
+        completed = []
+        worker_done = threading.Event()
+
+        def handler(topic, data):
+            def slow_task():
+                time.sleep(0.2)
+                completed.append(data["data"]["step"])
+                worker_done.set()
+
+            threading.Thread(target=slow_task, daemon=True).start()
+
+        ordered_bus.subscribe("pet/system/*", handler)
+        try:
+            start = time.time()
+            ordered_bus.publish("pet/system/test", {"step": 1})
+            publish_elapsed = time.time() - start
+            self.assertLess(publish_elapsed, 0.05)
+            self.assertTrue(worker_done.wait(1.0))
+        finally:
+            ordered_bus.shutdown()
+        self.assertEqual(completed, [1])
 
     def test_key_value_and_categorized_memory_round_trip(self):
         self.memory.set("current_mood", "happy")
@@ -342,6 +417,118 @@ class TestPluginLoaderAndWiring(BaseOverallTest):
         self.assertIs(self.bus._wake, fake_wake)
         self.assertIs(self.bus._stt, fake_stt)
         self.assertIs(self.bus._tts, fake_tts)
+
+    def test_os_bridge_plugin_respects_disabled_flag(self):
+        cfg = json.loads(json.dumps(self.config))
+        cfg["os_bridge"]["enabled"] = False
+        with mock.patch.object(os_bridge_plugin, "OSBridgeExecutor") as executor_cls:
+            os_bridge_plugin.start(self.bus, self.hal, self.memory, cfg)
+        executor_cls.assert_not_called()
+        self.assertFalse(hasattr(self.bus, "_os_bridge"))
+
+
+class TestOSBridge(BaseOverallTest):
+    def test_os_bridge_executor_processes_steps_in_order_and_publishes_status(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        executor.delay_between_actions = 0
+        statuses = []
+        calls = []
+        self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+        with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=lambda name: calls.append(("open_app", name))), \
+             mock.patch.object(os_bridge_executor_module, "type_text", side_effect=lambda text: calls.append(("type_text", text))):
+            executor._execute_task(
+                {
+                    "task_id": "task_123",
+                    "actions": [
+                        {"step": 2, "type": "type_text", "text": "hello world"},
+                        {"step": 1, "type": "open_app", "target": "notepad"},
+                    ],
+                }
+            )
+        self.wait(0.2)
+        self.assertEqual(calls, [("open_app", "notepad"), ("type_text", "hello world")])
+        self.assertEqual(
+            [(item["step"], item["status"]) for item in statuses],
+            [(1, "completed"), (2, "completed")],
+        )
+
+    def test_os_bridge_executor_handles_invalid_app_name_failure(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        statuses = []
+        self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+        with mock.patch.object(
+            os_bridge_executor_module,
+            "open_app",
+            side_effect=FileNotFoundError("app not found: missing-app"),
+        ):
+            executor._execute_task(
+                {
+                    "task_id": "task_fail",
+                    "actions": [
+                        {"step": 1, "type": "open_app", "target": "missing-app"},
+                    ],
+                }
+            )
+        self.assertEqual(statuses[-1]["status"], "failed")
+        self.assertIn("app not found", statuses[-1]["error"])
+
+    def test_os_bridge_executor_normalizes_wrapped_event_payload(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        wrapped = {
+            "seq": 9,
+            "timestamp": time.time(),
+            "topic": "pet/ai/action",
+            "source": "ai",
+            "data": {
+                "task_id": "task_wrapped",
+                "actions": [{"step": 1, "type": "press", "key": "enter"}],
+            },
+        }
+        normalized = executor._normalize_payload(wrapped)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["task_id"], "task_wrapped")
+        self.assertEqual(normalized["actions"][0]["type"], "press")
+
+    def test_os_bridge_keyboard_helpers_proxy_pyautogui(self):
+        fake_pag = mock.Mock()
+        original = os_bridge_keyboard_module._pyautogui
+        try:
+            os_bridge_keyboard_module._pyautogui = fake_pag
+            os_bridge_keyboard_module.type_text("hello")
+            os_bridge_keyboard_module.press("enter")
+            os_bridge_keyboard_module.hotkey("ctrl", "s")
+        finally:
+            os_bridge_keyboard_module._pyautogui = original
+        fake_pag.write.assert_called_once()
+        fake_pag.press.assert_called_once_with("enter")
+        fake_pag.hotkey.assert_called_once_with("ctrl", "s", interval=0.03)
+
+    def test_os_bridge_open_app_uses_platform_specific_command(self):
+        with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="darwin"), \
+             mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen:
+            process = mock.Mock()
+            process.returncode = 0
+            process.communicate.return_value = (b"", b"")
+            popen.return_value = process
+            os_bridge_apps_module.open_app("TextEdit")
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], ["open", "-a", "TextEdit"])
+
+    def test_os_bridge_open_app_windows_and_linux_paths(self):
+        with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="windows"), \
+             mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen:
+            win_process = mock.Mock()
+            win_process.wait.return_value = 0
+            popen.return_value = win_process
+            os_bridge_apps_module.open_app("notepad")
+        self.assertEqual(popen.call_args.args[0], ["start", "notepad"])
+        self.assertTrue(popen.call_args.kwargs["shell"])
+
+        with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="linux"), \
+             mock.patch.object(os_bridge_apps_module.shutil, "which", return_value="/usr/bin/gedit"), \
+             mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen_linux:
+            os_bridge_apps_module.open_app("gedit")
+        self.assertEqual(popen_linux.call_args.args[0], ["gedit"])
 
 
 class TestEmotionIdleSoundAndRenderer(BaseOverallTest):
@@ -576,6 +763,27 @@ class TestEmotionIdleSoundAndRenderer(BaseOverallTest):
         self.wait()
         self.assertEqual(received, [])
 
+    def test_input_simulator_text_command_mode_submits_as_speech(self):
+        input_sim = InputSimulator(self.bus)
+        speech_events = []
+        transcript_events = []
+        self.bus.subscribe("pet/input/speech", lambda topic, data: speech_events.append(data))
+        self.bus.subscribe("pet/voice/transcript", lambda topic, data: transcript_events.append(data))
+        input_sim._handle_key("/")
+        input_sim._handle_key("O")
+        input_sim._handle_key("p")
+        input_sim._handle_key("e")
+        input_sim._handle_key("n")
+        input_sim._handle_key(" ")
+        for ch in "TextEdit":
+            input_sim._handle_key(ch)
+        input_sim._handle_key("\n")
+        self.wait()
+        self.assertTrue(speech_events)
+        self.assertTrue(transcript_events)
+        self.assertEqual(speech_events[-1]["text"], "Open TextEdit")
+        self.assertEqual(speech_events[-1]["source"], "manual_text")
+
 
 class TestAIAndVoiceStack(BaseOverallTest):
     def setUp(self):
@@ -713,8 +921,10 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.bus.subscribe("pet/ai/action", lambda topic, data: actions.append(data))
         payload = (
             '{"text":"Hi there","intent":"greeting","emotion_suggestion":"neutral to positive",'
-            '"actions":[{"type":"remember_fact","key":"name","value":"Krishna"},'
-            '{"type":"set_mood","value":"curious"},{"type":"unsupported"}]}'
+            '"actions":[{"step":2,"type":"remember_fact","key":"name","value":"Krishna"},'
+            '{"step":1,"type":"set_mood","value":"curious"},'
+            '{"step":3,"type":"open_app","target":"TextEdit"},'
+            '{"step":4,"type":"type_text","text":"hello"},{"type":"unsupported"}]}'
         )
         with mock.patch.object(brain, "_groq_inference", return_value=payload):
             brain._process_ai_request("hello")
@@ -722,9 +932,15 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.assertGreaterEqual(len(responses), 1)
         self.assertEqual(responses[-1]["intent"], "social")
         self.assertIn(responses[-1]["emotion_suggestion"], {"happy", "neutral"})
-        self.assertEqual(len(actions), 2)
-        self.assertEqual(actions[0]["type"], "remember_fact")
-        self.assertEqual(actions[1]["type"], "set_mood")
+        self.assertEqual(len(actions), 1)
+        self.assertIn("task_id", actions[0])
+        self.assertEqual([item["type"] for item in actions[0]["actions"]], [
+            "set_mood",
+            "remember_fact",
+            "open_app",
+            "type_text",
+        ])
+        self.assertEqual(self.memory.recall("facts", "name"), "Krishna")
 
     def test_ai_question_requests_follow_up_listen(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)

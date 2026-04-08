@@ -2,6 +2,8 @@ import logging
 import time
 from typing import Dict, Any
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 # Mood definitions
@@ -64,12 +66,14 @@ class EmotionEngine:
         self.bus.subscribe("pet/system/tick", self._on_tick)
         self.bus.subscribe("pet/input/keyboard", self._on_debug)
         self.bus.subscribe("pet/ai/response", self._on_ai_response)
+        self.bus.subscribe("pet/ai/action", self._on_ai_action)
         logger.info("Emotion: ready")
 
     def stop(self):
         self._running = False
 
     def _on_touch(self, topic, data):
+        data = unwrap_event_payload(data)
         zone = data.get("zone")
         if zone in TOUCH_MOOD:
             new_mood = TOUCH_MOOD[zone]
@@ -77,6 +81,7 @@ class EmotionEngine:
         self.last_interaction_time = time.time()
 
     def _on_tick(self, topic, data):
+        data = unwrap_event_payload(data)
         if not self._running:
             return
         now = time.time()
@@ -87,6 +92,7 @@ class EmotionEngine:
             self._change_mood("bored", triggered_by="idle")
 
     def _on_debug(self, topic, data):
+        data = unwrap_event_payload(data)
         action = data.get("action")
         if action == "cycle_mood":
             moods = list(MOODS.keys())
@@ -97,9 +103,23 @@ class EmotionEngine:
             self.bus.publish("pet/sound/play", {"name": "notification"})
 
     def _on_ai_response(self, topic, data):
+        data = unwrap_event_payload(data)
         suggestion = data.get("emotion_suggestion")
         if suggestion and suggestion in MOODS:
             self._change_mood(suggestion, triggered_by="ai")
+
+    def _on_ai_action(self, topic, data):
+        data = unwrap_event_payload(data)
+        actions = data.get("actions") if isinstance(data, dict) else None
+        if actions is None:
+            actions = [data] if isinstance(data, dict) else []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") == "set_mood":
+                mood = action.get("value")
+                if mood in MOODS:
+                    self._change_mood(mood, triggered_by="ai_action")
 
     def _change_mood(self, new_mood, triggered_by=""):
         if new_mood == self.current_mood:

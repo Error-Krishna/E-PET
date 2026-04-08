@@ -59,8 +59,8 @@ def main():
     logger.info("Boot | config loaded")
 
     logger.info("Boot | starting event bus")
-    bus = EventBus()
-    logger.info("Boot | event bus ready")
+    bus = EventBus(config)
+    logger.info("Boot | event bus ready (ordered=%s)", config.get("event_bus", {}).get("ordered", False))
 
     hal_mode = config.get("hardware", {}).get("mode", "simulator")
     hal_debug = config.get("hardware", {}).get("debug", False)
@@ -151,6 +151,7 @@ def main():
             '_emotion_engine',
             '_sound_engine',
             '_idle_tick',
+            '_os_bridge',
             '_wake',
             '_stt',
             '_tts',

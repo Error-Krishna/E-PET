@@ -8,7 +8,7 @@ import wave
 import numpy as np
 
 from core.platform_utils import is_interactive_input
-from core.utils import profile
+from core.utils import profile, unwrap_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +105,11 @@ class SpeechToText:
             self.audio.terminate()
 
     def _on_wake(self, topic, data):
+        data = unwrap_event_payload(data)
         self._request_recording("wake_word")
 
     def _on_listen_for_reply(self, topic, data):
+        data = unwrap_event_payload(data)
         self._request_recording("follow_up")
 
     def _request_recording(self, source):

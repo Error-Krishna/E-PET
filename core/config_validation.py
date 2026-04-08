@@ -7,7 +7,7 @@ DEFAULT_CONFIG = {
         "debug": False,
     },
     "plugins": {
-        "enabled": ["emotion", "sound", "idle"],
+        "enabled": ["emotion", "sound", "idle", "os_bridge"],
     },
     "simulator": {
         "fps": 10,
@@ -26,6 +26,14 @@ DEFAULT_CONFIG = {
     },
     "logging": {
         "level": "INFO",
+    },
+    "event_bus": {
+        "ordered": True,
+        "log_events": False,
+    },
+    "os_bridge": {
+        "enabled": True,
+        "delay_between_actions": 0.3,
     },
     "voice": {
         "enabled": True,
@@ -92,6 +100,15 @@ def normalize_and_validate_config(raw_config):
     config["voice"]["wake_check_interval"] = max(0.1, float(config["voice"]["wake_check_interval"]))
     config["voice"]["wake_cooldown_seconds"] = max(0.5, float(config["voice"]["wake_cooldown_seconds"]))
     config["ai"]["request_timeout"] = max(5, int(config["ai"]["request_timeout"]))
+    ordered = config.get("event_bus", {}).get("ordered", True)
+    if isinstance(ordered, str):
+        ordered = ordered.strip().lower() in {"1", "true", "yes", "on"}
+    config.setdefault("event_bus", {})
+    config["event_bus"]["ordered"] = bool(ordered)
+    log_events = config["event_bus"].get("log_events", False)
+    if isinstance(log_events, str):
+        log_events = log_events.strip().lower() in {"1", "true", "yes", "on"}
+    config["event_bus"]["log_events"] = bool(log_events)
     config["personality"]["pet_name"] = str(config["personality"].get("pet_name", "Mochi")).strip() or "Mochi"
     ai_mode = str(config["ai"].get("mode", "offline")).strip().lower()
     if ai_mode == "local":

@@ -3,6 +3,8 @@ import threading
 import time
 from typing import Dict, Callable
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 # Try to import numpy and pygame; if missing, disable sound
@@ -65,6 +67,7 @@ class SoundEngine:
             pygame.mixer.quit()
 
     def _on_play_sound(self, topic, data):
+        data = unwrap_event_payload(data)
         name = data.get("name")
         if name in self.sounds:
             self._play_sound(name)
@@ -72,6 +75,7 @@ class SoundEngine:
             logger.debug(f"Unknown sound: {name}")
 
     def _on_emotion_changed(self, topic, data):
+        data = unwrap_event_payload(data)
         sound = data.get("sound")
         if sound and sound in self.sounds:
             self.bus.publish("pet/sound/play", {"name": sound, "source": "emotion"})
