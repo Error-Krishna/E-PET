@@ -7,6 +7,7 @@ plugins:
     - emotion
     - sound
     - idle
+    - os_bridge
     - voice
     - ai
 
@@ -26,6 +27,14 @@ idle:
 
 logging:
   level: INFO           # development default for plugin and runtime visibility
+
+event_bus:
+  ordered: true
+  log_events: false
+
+os_bridge:
+  enabled: true
+  delay_between_actions: 0.3
 
 voice:
   enabled: true

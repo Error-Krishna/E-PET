@@ -18,6 +18,7 @@ KEY_MAPPINGS = {
     'd': ('pet/input/touch', {'zone': 'double_tap'}),
     'm': ('pet/input/keyboard', {'action': 'cycle_mood'}),
     't': ('pet/input/keyboard', {'action': 'test_sound'}),
+    '/': ('pet/input/keyboard', {'action': 'text_command_mode'}),
     ' ': ('pet/input/wake_word', {'source': 'keyboard'}),
     'q': ('pet/system/quit', {}),
 }
@@ -28,6 +29,8 @@ class InputSimulator:
         self._running = True
         self._thread = None
         self._quit_sent = False
+        self._text_command_mode = False
+        self._text_command_buffer = []
 
     def start(self):
         self._thread = threading.Thread(target=self._run)
@@ -62,7 +65,7 @@ class InputSimulator:
 
         while self._running:
             if msvcrt.kbhit():
-                ch = msvcrt.getwch().lower()
+                ch = msvcrt.getwch()
                 self._handle_key(ch)
             time.sleep(0.01)
 
@@ -87,7 +90,7 @@ class InputSimulator:
                 ch = sys.stdin.read(1)
                 if not ch:
                     continue
-                self._handle_key(ch.lower())
+                self._handle_key(ch)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -96,8 +99,13 @@ class InputSimulator:
             time.sleep(0.2)
 
     def _handle_key(self, ch):
-        if ch in KEY_MAPPINGS:
-            topic, data = KEY_MAPPINGS[ch]
+        if self._text_command_mode:
+            self._handle_text_command_key(ch)
+            return
+
+        lower = ch.lower()
+        if lower in KEY_MAPPINGS:
+            topic, data = KEY_MAPPINGS[lower]
             # Avoid repeated quit events
             if topic == "pet/system/quit":
                 if self._quit_sent:
@@ -107,4 +115,47 @@ class InputSimulator:
             if topic == "pet/input/touch":
                 data = dict(data)
                 data['timestamp'] = time.time()
+            if topic == "pet/input/keyboard" and data.get("action") == "text_command_mode":
+                self._enter_text_command_mode()
+                return
             self.bus.publish(topic, data)
+
+    def _enter_text_command_mode(self):
+        self._text_command_mode = True
+        self._text_command_buffer = []
+        logger.info("Input: text command mode (type and press Enter, Esc cancels)")
+
+    def _exit_text_command_mode(self):
+        self._text_command_mode = False
+        self._text_command_buffer = []
+
+    def _submit_text_command(self):
+        text = "".join(self._text_command_buffer).strip()
+        self._exit_text_command_mode()
+        if not text:
+            logger.info("Input: text command cancelled")
+            return
+
+        payload = {
+            "text": text,
+            "confidence": 1.0,
+            "source": "manual_text",
+        }
+        logger.info("Input: text command submitted")
+        self.bus.publish("pet/input/speech", payload)
+        self.bus.publish("pet/voice/transcript", payload)
+
+    def _handle_text_command_key(self, ch):
+        if ch in ("\r", "\n"):
+            self._submit_text_command()
+            return
+        if ch == "\x1b":
+            self._exit_text_command_mode()
+            logger.info("Input: text command cancelled")
+            return
+        if ch in ("\b", "\x7f"):
+            if self._text_command_buffer:
+                self._text_command_buffer.pop()
+            return
+        if ch.isprintable():
+            self._text_command_buffer.append(ch)

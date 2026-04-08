@@ -95,6 +95,8 @@ Core:
 - `core/memory.py`
 - `core/config_validation.py`
 
+The event bus now supports an ordered mode controlled by `event_bus.ordered` in `config.yaml`. Ordered mode keeps FIFO processing per domain while preserving the existing async behavior when disabled.
+
 Plugins:
 - `plugins/emotion`
 - `plugins/idle`

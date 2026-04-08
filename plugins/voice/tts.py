@@ -8,6 +8,7 @@ import threading
 import time
 
 from core.platform_utils import resolve_executable
+from core.utils import unwrap_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class TextToSpeech:
             self._thread.join(timeout=1)
 
     def _on_say(self, topic, data):
+        data = unwrap_event_payload(data)
         text = data.get("text", "")
         if not text:
             return
@@ -88,6 +90,7 @@ class TextToSpeech:
             self._queue.put_nowait((text, speed, listen_after))
 
     def _on_stop(self, topic, data):
+        data = unwrap_event_payload(data)
         self._clear_queue()
         self._stop_playback()
         self._publish_state("stopped", "")

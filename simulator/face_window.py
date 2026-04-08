@@ -6,6 +6,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -223,9 +225,11 @@ class FaceWindow:
             pass
 
     def _on_emotion_changed(self, topic: str, data: Any):
+        data = unwrap_event_payload(data)
         self._enqueue(topic, data)
 
     def _on_quit(self, topic: str, data: Any):
+        data = unwrap_event_payload(data)
         self._quit_requested.set()
 
     def _drain_event_queue(self):

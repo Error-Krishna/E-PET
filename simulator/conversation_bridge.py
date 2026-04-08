@@ -4,6 +4,8 @@ import logging
 import queue
 from typing import Any
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,10 +32,13 @@ class ConversationBridge:
             pass
 
     def _on_input(self, topic, data):
+        data = unwrap_event_payload(data)
         self._enqueue("input", data)
 
     def _on_response(self, topic, data):
+        data = unwrap_event_payload(data)
         self._enqueue("response", data)
 
     def _on_quit(self, topic, data):
+        data = unwrap_event_payload(data)
         self._enqueue("quit", data)

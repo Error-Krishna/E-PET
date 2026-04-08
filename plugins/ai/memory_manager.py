@@ -3,6 +3,8 @@ import logging
 import re
 import time
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,21 +35,30 @@ class MemoryManager:
         self._running = False
 
     def _on_speech(self, topic, data):
+        data = unwrap_event_payload(data)
         text = data.get("text", "")
         self._add_to_history("user", text)
         self._extract_and_store_facts(text)
         self._increment_interaction_count()
 
     def _on_response(self, topic, data):
+        data = unwrap_event_payload(data)
         text = data.get("text", "")
         self._add_to_history("assistant", text)
 
     def _on_action(self, topic, data):
-        if data.get("type") == "remember_fact":
-            key = data.get("key", "").strip()
-            value = data.get("value", "").strip()
-            if key and value:
-                self.memory.remember("facts", key, value)
+        data = unwrap_event_payload(data)
+        actions = data.get("actions") if isinstance(data, dict) else None
+        if actions is None:
+            actions = [data] if isinstance(data, dict) else []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") == "remember_fact":
+                key = str(action.get("key", "")).strip()
+                value = str(action.get("value", "")).strip()
+                if key and value:
+                    self.memory.remember("facts", key, value)
 
     def _add_to_history(self, role, text):
         if not text:
