@@ -8,6 +8,8 @@ groq>=0.20
 pyautogui>=0.9.54
 pvrecorder>=1.2.4
 pyttsx3>=2.90
+streamlit>=1.37
+streamlit-autorefresh>=1.0.1
 
 # Voice enhancement packages
 # The project works with the default install, and these packages improve wake
