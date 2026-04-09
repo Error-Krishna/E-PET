@@ -34,6 +34,9 @@ DEFAULT_CONFIG = {
     "os_bridge": {
         "enabled": True,
         "delay_between_actions": 0.3,
+        "max_retries": 2,
+        "retry_delay": 0.15,
+        "continue_on_failure": False,
     },
     "voice": {
         "enabled": True,
@@ -119,5 +122,12 @@ def normalize_and_validate_config(raw_config):
     config["ai"]["groq_api_key"] = str(config["ai"].get("groq_api_key", "")).strip()
     groq_model = str(config["ai"].get("groq_model", "llama-3.1-8b-instant")).strip()
     config["ai"]["groq_model"] = groq_model or "llama-3.1-8b-instant"
+    config["os_bridge"]["delay_between_actions"] = max(0.0, float(config["os_bridge"]["delay_between_actions"]))
+    config["os_bridge"]["max_retries"] = max(0, int(config["os_bridge"]["max_retries"]))
+    config["os_bridge"]["retry_delay"] = max(0.0, float(config["os_bridge"]["retry_delay"]))
+    continue_on_failure = config["os_bridge"].get("continue_on_failure", False)
+    if isinstance(continue_on_failure, str):
+        continue_on_failure = continue_on_failure.strip().lower() in {"1", "true", "yes", "on"}
+    config["os_bridge"]["continue_on_failure"] = bool(continue_on_failure)
 
     return config

@@ -109,6 +109,8 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(DEFAULT_CONFIG["ai"]["groq_model"], "llama-3.1-8b-instant")
         self.assertTrue(DEFAULT_CONFIG["event_bus"]["ordered"])
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
+        self.assertEqual(DEFAULT_CONFIG["os_bridge"]["max_retries"], 2)
+        self.assertFalse(DEFAULT_CONFIG["os_bridge"]["continue_on_failure"])
 
     def test_config_validation_normalizes_and_clamps(self):
         config = normalize_and_validate_config(
@@ -447,10 +449,41 @@ class TestOSBridge(BaseOverallTest):
             )
         self.wait(0.2)
         self.assertEqual(calls, [("open_app", "notepad"), ("type_text", "hello world")])
-        self.assertEqual(
-            [(item["step"], item["status"]) for item in statuses],
-            [(1, "completed"), (2, "completed")],
-        )
+        completed_statuses = [item for item in statuses if item["status"] == "completed"]
+        self.assertEqual([(item["step"], item["status"]) for item in completed_statuses], [(1, "completed"), (2, "completed")])
+        state = executor.get_task_state("task_123")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["current_step"], 2)
+
+    def test_os_bridge_executor_retries_open_app_fallbacks_before_failing(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        executor.delay_between_actions = 0
+        executor.retry_delay = 0
+        executor.max_retries = 2
+        attempts = []
+        statuses = []
+        self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+
+        def fake_open_app(name):
+            attempts.append(name)
+            if name != "__default_browser__":
+                raise FileNotFoundError(f"app not found: {name}")
+
+        with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=fake_open_app):
+            executor._execute_task(
+                {
+                    "task_id": "task_retry",
+                    "actions": [
+                        {"step": 1, "type": "open_app", "target": "chrome"},
+                    ],
+                }
+            )
+
+        self.assertEqual(attempts[:3], ["chrome", "google chrome", "__default_browser__"])
+        self.wait(0.2)
+        state = executor.get_task_state("task_retry")
+        self.assertEqual(state["status"], "completed")
+        self.assertTrue(any(item["status"] == "running" and item["step"] == 1 for item in statuses))
 
     def test_os_bridge_executor_handles_invalid_app_name_failure(self):
         executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
@@ -469,8 +502,33 @@ class TestOSBridge(BaseOverallTest):
                     ],
                 }
             )
+        self.wait(0.2)
         self.assertEqual(statuses[-1]["status"], "failed")
         self.assertIn("app not found", statuses[-1]["error"])
+
+    def test_os_bridge_executor_can_continue_after_failure_when_configured(self):
+        cfg = json.loads(json.dumps(self.config))
+        cfg["os_bridge"]["continue_on_failure"] = True
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, cfg)
+        executor.delay_between_actions = 0
+        statuses = []
+        calls = []
+        self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+        with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=FileNotFoundError("app not found: missing")), \
+             mock.patch.object(os_bridge_executor_module, "type_text", side_effect=lambda text: calls.append(("type_text", text))):
+            executor._execute_task(
+                {
+                    "task_id": "task_continue",
+                    "actions": [
+                        {"step": 1, "type": "open_app", "target": "missing"},
+                        {"step": 2, "type": "type_text", "text": "still runs"},
+                    ],
+                }
+            )
+        self.wait(0.2)
+        self.assertEqual(calls, [("type_text", "still runs")])
+        self.assertEqual(executor.get_task_state("task_continue")["status"], "failed")
+        self.assertTrue(any(item["step"] == 2 and item["status"] == "completed" for item in statuses))
 
     def test_os_bridge_executor_normalizes_wrapped_event_payload(self):
         executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)

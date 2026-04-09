@@ -35,6 +35,9 @@ event_bus:
 os_bridge:
   enabled: true
   delay_between_actions: 0.3
+  max_retries: 2
+  retry_delay: 0.15
+  continue_on_failure: false
 
 voice:
   enabled: true
