@@ -56,11 +56,14 @@ class StreamlitBackend:
             "pet/emotion/changed",
             "pet/sound/play",
             "pet/ai/response",
+            "pet/ai/backend",
             "pet/voice/transcript",
             "pet/voice/tts_state",
             "pet/input/wake_word",
             "pet/system/tick",
         }
+        self._last_ai_backend: str | None = None
+        self._last_ai_backend_reason: str | None = None
 
     def start(self):
         if not self._started:
@@ -119,6 +122,8 @@ class StreamlitBackend:
             "interaction_count": interaction_count,
             "facts": facts,
             "hal_state": hal_state,
+            "ai_backend": self._last_ai_backend or "unknown",
+            "ai_backend_reason": self._last_ai_backend_reason or "",
         }
 
     def _run(self):
@@ -163,6 +168,13 @@ class StreamlitBackend:
         }
         if topic == "pet/emotion/changed" and isinstance(data, dict):
             event["mood"] = data.get("mood", "neutral")
+        elif topic == "pet/ai/backend" and isinstance(data, dict):
+            backend = str(data.get("backend", "unknown"))
+            reason = str(data.get("reason", ""))
+            self._last_ai_backend = backend
+            self._last_ai_backend_reason = reason
+            event["backend"] = backend
+            event["reason"] = reason
         elif topic == "pet/ai/response" and isinstance(data, dict):
             event["text"] = data.get("text", "")
             event["intent"] = data.get("intent", "social")

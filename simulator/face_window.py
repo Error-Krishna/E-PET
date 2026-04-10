@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import time
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -110,43 +111,30 @@ class FaceWindow:
         if self._screen is None:
             return
 
-        mood = self._mood
+        mood = self._mood if self._mood in MOOD_STYLE else "neutral"
+        self._draw_original_face(mood)
+        pygame.display.flip()
+
+    def _draw_original_face(self, mood: str):
         style = MOOD_STYLE.get(mood, MOOD_STYLE["neutral"])
-        bg = {
-            "happy": (26, 35, 46),
-            "excited": (45, 28, 16),
-            "love": (38, 20, 30),
-            "curious": (18, 34, 26),
-            "thinking": (17, 24, 46),
-            "neutral": (15, 23, 42),
-            "bored": (24, 27, 34),
-            "sleepy": (10, 15, 28),
-            "sad": (14, 24, 38),
-            "nervous": (31, 18, 42),
-            "angry": (45, 18, 18),
-            "surprised": (39, 15, 31),
-        }.get(mood, (15, 23, 42))
+        self._screen.fill((10, 12, 20))
 
-        self._screen.fill(bg)
+        panel = pygame.Rect(18, 18, self._square_size - 36, self._square_size - 36)
+        pygame.draw.rect(self._screen, (24, 28, 39), panel, border_radius=28)
+        pygame.draw.rect(self._screen, style["accent"], panel, width=2, border_radius=28)
 
-        title_font = pygame.font.SysFont("Helvetica", 13, bold=True)
-        tiny_font = pygame.font.SysFont("Helvetica", 10)
         center_x = self._square_size // 2
-        center_y = self._square_size // 2 - 14
-        face_rect = pygame.Rect(34, 18, 352, 348)
-        pygame.draw.rect(self._screen, (17, 24, 39), face_rect, border_radius=40)
-        pygame.draw.rect(self._screen, style["accent"], face_rect, width=4, border_radius=36)
+        center_y = self._square_size // 2 - 6
 
         self._draw_eyes(style["eyes"], center_x, center_y)
         self._draw_mouth(style["mouth"], center_x, center_y)
 
-        title_surface = title_font.render(mood.upper(), True, (226, 232, 240))
-        self._screen.blit(title_surface, title_surface.get_rect(center=(center_x, 372)))
-
-        footer = tiny_font.render("Close window to quit", True, (148, 163, 184))
-        self._screen.blit(footer, footer.get_rect(center=(center_x, 392)))
-
-        pygame.display.flip()
+        if mood == "love":
+            pygame.draw.circle(self._screen, style["accent"], (center_x - 120, center_y - 90), 5)
+            pygame.draw.circle(self._screen, style["accent"], (center_x + 120, center_y - 82), 5)
+        elif mood == "surprised":
+            pygame.draw.circle(self._screen, (255, 255, 255), (center_x - 58, center_y - 56), 3)
+            pygame.draw.circle(self._screen, (255, 255, 255), (center_x + 58, center_y - 56), 3)
 
     def _draw_eyes(self, eye_type: str, center_x: int, center_y: int):
         left = (center_x - 72, center_y - 48)

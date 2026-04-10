@@ -82,6 +82,12 @@ class BaseOverallTest(unittest.TestCase):
                     "mode": "online",
                     "groq_api_key": "test-groq-key",
                     "groq_model": "llama-3.1-8b-instant",
+                    "ollama_host": "http://localhost:11434",
+                    "ollama_model": "phi3:mini",
+                    "ollama_keep_alive": "10m",
+                    "ollama_temperature": 0.7,
+                    "ollama_num_ctx": 1024,
+                    "ollama_num_predict": 96,
                     "request_timeout": 60,
                 },
                 "memory": {"max_history": 20, "persist_history": True, "extract_facts": True},
@@ -107,6 +113,12 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(DEFAULT_CONFIG["personality"]["pet_name"], "Mochi")
         self.assertEqual(DEFAULT_CONFIG["ai"]["mode"], "auto")
         self.assertEqual(DEFAULT_CONFIG["ai"]["groq_model"], "llama-3.1-8b-instant")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_host"], "http://localhost:11434")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_model"], "phi3:mini")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_keep_alive"], "10m")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_temperature"], 0.7)
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_num_ctx"], 1024)
+        self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_num_predict"], 96)
         self.assertTrue(DEFAULT_CONFIG["event_bus"]["ordered"])
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
         self.assertEqual(DEFAULT_CONFIG["os_bridge"]["max_retries"], 2)
@@ -906,29 +918,99 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.assertIn("temperature", payload)
         self.assertEqual(captured["kwargs"]["headers"]["Authorization"], "Bearer test-groq-key")
 
-    def test_ai_brain_offline_mode_bypasses_network_calls(self):
+    def test_ai_brain_offline_mode_uses_ollama(self):
         offline_config = json.loads(json.dumps(self.config))
         offline_config["ai"]["mode"] = "offline"
         brain = AIBrain(self.bus, self.hal, self.memory, offline_config)
         events = []
         self.bus.subscribe("pet/ai/response", lambda topic, data: events.append(data))
-        with mock.patch.object(brain_module.requests, "post") as mocked_post:
+        with mock.patch.object(brain, "_start_ollama_server", return_value=True), \
+             mock.patch.object(brain, "_ollama_inference", return_value='{"text":"ok"}') as ollama_call, \
+             mock.patch.object(brain_module.requests, "post") as mocked_post:
             brain._process_ai_request("hello")
             self.wait(0.3)
         mocked_post.assert_not_called()
+        ollama_call.assert_called_once()
         self.assertTrue(events)
-        self.assertEqual(events[-1]["intent"], "system")
-        self.assertEqual(events[-1]["emotion_suggestion"], "neutral")
+        self.assertEqual(events[-1]["text"], "ok")
+
+    def test_ai_brain_ollama_payload_uses_configured_model_and_host(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        fake_response = mock.Mock()
+        fake_response.raise_for_status.return_value = None
+        fake_response.json.return_value = {
+            "response": '{"text":"ok"}'
+        }
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return fake_response
+
+        with mock.patch.object(brain, "_start_ollama_server", return_value=True), \
+             mock.patch.object(brain_module.requests, "post", side_effect=fake_post):
+            result = brain._ollama_inference("hello")
+
+        self.assertEqual(result, '{"text":"ok"}')
+        self.assertEqual(captured["url"], f"{self.config['ai']['ollama_host']}/api/generate")
+        payload = captured["kwargs"]["json"]
+        self.assertEqual(payload["model"], self.config["ai"]["ollama_model"])
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["options"]["num_predict"], 96)
+        self.assertEqual(payload["options"]["num_ctx"], 1024)
+        self.assertEqual(payload["options"]["keep_alive"], self.config["ai"]["ollama_keep_alive"])
+        self.assertEqual(payload["options"]["temperature"], self.config["ai"]["ollama_temperature"])
+
+    def test_ai_brain_resolves_phi3_model_from_ollama_tags(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        with mock.patch.object(
+            brain_module.requests,
+            "get",
+            return_value=mock.Mock(
+                status_code=200,
+                json=mock.Mock(return_value={
+                    "models": [{"name": "phi3:latest"}]
+                }),
+            ),
+        ):
+            self.assertEqual(brain._resolve_ollama_model(force_refresh=True), "phi3:latest")
+
+    def test_ai_brain_prefers_faster_phi3_mini_when_available(self):
+        fast_config = json.loads(json.dumps(self.config))
+        fast_config["ai"]["ollama_model"] = "phi3:mini"
+        brain = AIBrain(self.bus, self.hal, self.memory, fast_config)
+        with mock.patch.object(
+            brain_module.requests,
+            "get",
+            return_value=mock.Mock(
+                status_code=200,
+                json=mock.Mock(return_value={
+                    "models": [{"name": "phi3:mini"}, {"name": "phi3:latest"}]
+                }),
+            ),
+        ):
+            self.assertEqual(brain._resolve_ollama_model(force_refresh=True), "phi3:mini")
+
+    def test_ai_brain_ollama_health_requires_ok_status(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        with mock.patch.object(brain_module.requests, "get") as mocked_get:
+            mocked_get.return_value = mock.Mock(status_code=404)
+            self.assertFalse(brain._ollama_available())
+            mocked_get.return_value = mock.Mock(status_code=200)
+            self.assertTrue(brain._ollama_available())
 
     def test_ai_brain_auto_mode_uses_groq_when_available(self):
         auto_config = json.loads(json.dumps(self.config))
         auto_config["ai"]["mode"] = "auto"
         brain = AIBrain(self.bus, self.hal, self.memory, auto_config)
         with mock.patch.object(brain, "_groq_available", return_value=True), \
-             mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok"}') as groq_call:
+             mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok"}') as groq_call, \
+             mock.patch.object(brain, "_ollama_inference") as ollama_call:
             brain._process_ai_request("hello")
             self.wait(0.3)
         groq_call.assert_called_once()
+        ollama_call.assert_not_called()
 
     def test_ai_brain_auto_mode_falls_back_when_groq_unavailable(self):
         auto_config = json.loads(json.dumps(self.config))
@@ -937,13 +1019,15 @@ class TestAIAndVoiceStack(BaseOverallTest):
         events = []
         self.bus.subscribe("pet/ai/response", lambda topic, data: events.append(data))
         with mock.patch.object(brain, "_groq_available", return_value=False), \
+             mock.patch.object(brain, "_start_ollama_server", return_value=True), \
+             mock.patch.object(brain, "_ollama_inference", return_value='{"text":"ok"}') as ollama_call, \
              mock.patch.object(brain, "_groq_inference") as groq_call:
             brain._process_ai_request("hello")
             self.wait(0.3)
         groq_call.assert_not_called()
+        ollama_call.assert_called_once()
         self.assertTrue(events)
-        self.assertEqual(events[-1]["intent"], "system")
-        self.assertEqual(events[-1]["emotion_suggestion"], "neutral")
+        self.assertEqual(events[-1]["text"], "ok")
 
     def test_ai_brain_prefers_environment_api_key(self):
         env_config = json.loads(json.dumps(self.config))
@@ -1196,6 +1280,30 @@ class TestAIAndVoiceStack(BaseOverallTest):
         detector = WakeWordDetector(self.bus, self.hal, self.memory, self.config)
         detector.audio_stream = None
         detector.porcupine = None
+        detector.stop()
+
+    def test_wake_detection_pauses_while_tts_is_speaking(self):
+        detector = WakeWordDetector(self.bus, self.hal, self.memory, self.config)
+        self.assertFalse(detector._paused.is_set())
+
+        detector._on_tts_state("pet/voice/tts_state", {"state": "speaking"})
+        self.assertTrue(detector._paused.is_set())
+
+        detector._on_tts_state("pet/voice/tts_state", {"state": "idle"})
+        self.assertFalse(detector._paused.is_set())
+
+        detector.stop()
+
+    def test_wake_detection_stays_paused_during_followup_listening(self):
+        detector = WakeWordDetector(self.bus, self.hal, self.memory, self.config)
+        self.bus._voice_followup_active = True
+        detector._on_tts_state("pet/voice/tts_state", {"state": "idle"})
+        self.assertTrue(detector._paused.is_set())
+
+        self.bus._voice_followup_active = False
+        detector._on_tts_state("pet/voice/tts_state", {"state": "idle"})
+        self.assertFalse(detector._paused.is_set())
+
         detector.stop()
 
 

@@ -60,6 +60,7 @@ class TextToSpeech:
     def stop(self):
         self._running = False
         self._stop_playback()
+        setattr(self.bus, "_voice_followup_active", False)
         if self._thread:
             self._thread.join(timeout=1)
 
@@ -93,6 +94,7 @@ class TextToSpeech:
         data = unwrap_event_payload(data)
         self._clear_queue()
         self._stop_playback()
+        setattr(self.bus, "_voice_followup_active", False)
         self._publish_state("stopped", "")
 
     def _run(self):
@@ -106,9 +108,12 @@ class TextToSpeech:
                     self._speak_system_tts(text, speed)
                 else:
                     self._print_text(text)
-                self._publish_state("idle", text)
                 if listen_after:
+                    setattr(self.bus, "_voice_followup_active", True)
                     self._publish_listen_for_reply(text)
+                else:
+                    setattr(self.bus, "_voice_followup_active", False)
+                self._publish_state("idle", text)
             except queue.Empty:
                 continue
             except Exception as e:

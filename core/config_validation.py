@@ -60,6 +60,12 @@ DEFAULT_CONFIG = {
         "mode": "auto",
         "groq_api_key": "",
         "groq_model": "llama-3.1-8b-instant",
+        "ollama_host": "http://localhost:11434",
+        "ollama_model": "phi3:mini",
+        "ollama_keep_alive": "10m",
+        "ollama_temperature": 0.7,
+        "ollama_num_ctx": 1024,
+        "ollama_num_predict": 96,
         "request_timeout": 60,
     },
     "memory": {
@@ -122,6 +128,19 @@ def normalize_and_validate_config(raw_config):
     config["ai"]["groq_api_key"] = str(config["ai"].get("groq_api_key", "")).strip()
     groq_model = str(config["ai"].get("groq_model", "llama-3.1-8b-instant")).strip()
     config["ai"]["groq_model"] = groq_model or "llama-3.1-8b-instant"
+    ollama_host = str(config["ai"].get("ollama_host", "http://localhost:11434")).strip().rstrip("/")
+    if not ollama_host:
+        ollama_host = "http://localhost:11434"
+    if "://" not in ollama_host:
+        ollama_host = f"http://{ollama_host}"
+    config["ai"]["ollama_host"] = ollama_host
+    ollama_model = str(config["ai"].get("ollama_model", "phi3:mini")).strip()
+    config["ai"]["ollama_model"] = ollama_model or "phi3:mini"
+    ollama_keep_alive = str(config["ai"].get("ollama_keep_alive", "10m")).strip()
+    config["ai"]["ollama_keep_alive"] = ollama_keep_alive or "10m"
+    config["ai"]["ollama_temperature"] = max(0.0, float(config["ai"].get("ollama_temperature", 0.7)))
+    config["ai"]["ollama_num_ctx"] = max(256, int(config["ai"].get("ollama_num_ctx", 1024)))
+    config["ai"]["ollama_num_predict"] = max(16, int(config["ai"].get("ollama_num_predict", 96)))
     config["os_bridge"]["delay_between_actions"] = max(0.0, float(config["os_bridge"]["delay_between_actions"]))
     config["os_bridge"]["max_retries"] = max(0, int(config["os_bridge"]["max_retries"]))
     config["os_bridge"]["retry_delay"] = max(0.0, float(config["os_bridge"]["retry_delay"]))

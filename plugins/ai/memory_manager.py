@@ -122,9 +122,9 @@ class MemoryManager:
         bond_level = min(1.0, count / 50.0)
         self.memory.remember("personality", "bond_level", f"{bond_level:.2f}")
 
-    def get_context(self):
+    def get_context(self, limit=8):
         """Return conversation history and extracted facts as a string."""
-        recent_history = self.get_recent_history(limit=8)
+        recent_history = self.get_recent_history(limit=limit)
         context = "\n".join([f"{msg['role']}: {msg['text']}" for msg in recent_history])
         # Retrieve facts from memory
         name = self.memory.recall("facts", "name")

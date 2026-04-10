@@ -26,6 +26,21 @@ def start(bus, hal, memory, config):
     brain.start()
     bus._brain = brain
 
+    if brain.mode == "offline":
+        selected_backend = "ollama"
+    elif brain.mode == "online":
+        selected_backend = "groq"
+    else:
+        selected_backend = "groq" if brain._groq_available() else "ollama"
+    if selected_backend == "ollama":
+        try:
+            selected_model = brain._resolve_ollama_model(force_refresh=True)
+        except Exception:
+            selected_model = brain.ollama_model
+        logger.info("AI backend selected: %s (%s)", selected_backend, selected_model)
+    else:
+        logger.info("AI backend selected: %s", selected_backend)
+
     def _ai_worker():
         while True:
             payload = bus._ai_queue.get()

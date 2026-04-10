@@ -2,10 +2,12 @@ import json
 import logging
 import queue
 import os
+import subprocess
 import threading
 import time
 import uuid
 
+from core.platform_utils import resolve_executable
 from core.utils import profile, unwrap_event_payload
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,10 @@ except ImportError:
 
 GROQ_API_BASE_URL = "https://api.groq.com"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+OLLAMA_DEFAULT_HOST = "http://localhost:11434"
+OLLAMA_GENERATE_PATH = "/api/generate"
+OLLAMA_DEFAULT_MODEL = "phi3-latest"
+OLLAMA_FAST_MODEL = "phi3:mini"
 
 
 class AIBrain:
@@ -47,8 +53,18 @@ class AIBrain:
             os.environ.get("GROQ_API_KEY") or ai_config.get("groq_api_key", "")
         ).strip()
         self.groq_model = str(ai_config.get("groq_model", "llama-3.1-8b-instant")).strip()
+        self.ollama_host = self._normalize_ollama_host(ai_config.get("ollama_host", OLLAMA_DEFAULT_HOST))
+        self.ollama_model = str(ai_config.get("ollama_model", OLLAMA_FAST_MODEL)).strip()
+        self.ollama_generate_url = f"{self.ollama_host}{OLLAMA_GENERATE_PATH}"
+        self.ollama_keep_alive = str(ai_config.get("ollama_keep_alive", "10m")).strip() or "10m"
+        self.ollama_temperature = float(ai_config.get("ollama_temperature", 0.7))
+        self.ollama_num_ctx = max(256, int(ai_config.get("ollama_num_ctx", 1024)))
+        self.ollama_num_predict = max(16, int(ai_config.get("ollama_num_predict", 96)))
         self.request_timeout = ai_config.get("request_timeout", 60)
         self.fallback_response = "I'm sorry, I'm having trouble thinking right now."
+        self._ollama_process = None
+        self._resolved_ollama_model = None
+        self._last_backend_status: tuple[str | None, str | None] = (None, None)
 
         # Access to memory manager through bus? We'll use direct memory for now.
         # We'll assume memory manager is started and accessible via bus._memory_manager.
@@ -66,6 +82,22 @@ class AIBrain:
             }
         )
 
+    def _publish_backend_status(self, backend: str, reason: str = "") -> None:
+        current = (backend, reason)
+        if self._last_backend_status == current:
+            return
+        self._last_backend_status = current
+        self.bus.publish(
+            "pet/ai/backend",
+            {
+                "backend": backend,
+                "reason": reason,
+                "mode": self.mode,
+                "ollama_host": self.ollama_host,
+                "ollama_model": self.ollama_model,
+            },
+        )
+
     def _groq_available(self):
         if not REQUESTS_AVAILABLE or not self.groq_api_key:
             return False
@@ -75,6 +107,205 @@ class AIBrain:
             return response is not None
         except Exception:
             return False
+
+    def _normalize_ollama_host(self, host: str) -> str:
+        value = str(host or OLLAMA_DEFAULT_HOST).strip().rstrip("/")
+        if not value:
+            value = OLLAMA_DEFAULT_HOST
+        if "://" not in value:
+            value = f"http://{value}"
+        return value
+
+    def _ollama_health_url(self) -> str:
+        return f"{self.ollama_host}/api/tags"
+
+    def _ollama_tag_models(self) -> list[str]:
+        if not REQUESTS_AVAILABLE:
+            return []
+        try:
+            response = requests.get(
+                self._ollama_health_url(),
+                timeout=min(3, float(self.request_timeout)),
+            )
+            if response is None or response.status_code != 200:
+                return []
+            payload = response.json() if response.content else {}
+            models = payload.get("models", [])
+            if not isinstance(models, list):
+                return []
+            names = []
+            for item in models:
+                if isinstance(item, dict):
+                    name = str(item.get("name", "")).strip()
+                    if name:
+                        names.append(name)
+            return names
+        except Exception:
+            return []
+
+    def _ollama_available(self) -> bool:
+        if not REQUESTS_AVAILABLE:
+            return False
+        try:
+            response = requests.get(
+                self._ollama_health_url(),
+                timeout=min(3, float(self.request_timeout)),
+            )
+            return response is not None and response.status_code == 200
+        except Exception:
+            return False
+
+    def _resolve_ollama_model(self, force_refresh: bool = False) -> str:
+        if self._resolved_ollama_model is not None and not force_refresh:
+            return self._resolved_ollama_model
+
+        models = self._ollama_tag_models()
+        candidates = []
+        for candidate in [
+            self.ollama_model,
+            OLLAMA_FAST_MODEL,
+            OLLAMA_DEFAULT_MODEL,
+            "phi3:latest",
+            "phi3",
+        ]:
+            candidate = str(candidate).strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        for candidate in candidates:
+            if candidate in models:
+                self._resolved_ollama_model = candidate
+                return candidate
+
+        for candidate in candidates:
+            lowered = candidate.lower()
+            for model in models:
+                if model.lower() == lowered or model.lower().startswith(lowered) or lowered in model.lower():
+                    self._resolved_ollama_model = model
+                    return model
+
+        for model in models:
+            if "phi3" in model.lower():
+                self._resolved_ollama_model = model
+                return model
+
+        if models:
+            self._resolved_ollama_model = models[0]
+            return models[0]
+
+        self._resolved_ollama_model = self.ollama_model or OLLAMA_DEFAULT_MODEL
+        return self._resolved_ollama_model
+
+    def _start_ollama_server(self) -> bool:
+        if self._ollama_available():
+            return True
+        if self._ollama_process is not None and self._ollama_process.poll() is None:
+            return True
+
+        executable = resolve_executable("ollama")
+        if not executable:
+            logger.debug("Ollama executable not found on PATH")
+            return False
+
+        try:
+            self._ollama_process = subprocess.Popen(
+                [executable, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.debug("Failed to start Ollama server: %s", exc)
+            self._ollama_process = None
+            return False
+
+        deadline = time.time() + min(10.0, float(self.request_timeout))
+        while time.time() < deadline:
+            if self._ollama_available():
+                logger.info("Ollama server ready at %s", self.ollama_host)
+                return True
+            time.sleep(0.25)
+
+        logger.warning("Ollama server did not become ready in time")
+        return False
+
+    def _ollama_inference(self, prompt):
+        if not REQUESTS_AVAILABLE:
+            raise RuntimeError("requests is not available")
+        if not self._start_ollama_server():
+            logger.error("Ollama server unavailable")
+            return self._fallback_payload()
+
+        ollama_model = self._resolve_ollama_model()
+        payload = {
+            "model": ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": self.ollama_temperature,
+                "num_predict": self.ollama_num_predict,
+                "num_ctx": self.ollama_num_ctx,
+                "keep_alive": self.ollama_keep_alive,
+            },
+        }
+        try:
+            resp = requests.post(
+                self.ollama_generate_url,
+                json=payload,
+                timeout=self.request_timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = str(data.get("response", "")).strip()
+            if not content:
+                raise ValueError("Ollama response did not contain generated text")
+            return content
+        except Exception as e:
+            if getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 404:
+                fallback_model = self._resolve_ollama_model(force_refresh=True)
+                if fallback_model != payload["model"]:
+                    logger.warning("Ollama model %s unavailable; retrying with %s", payload["model"], fallback_model)
+                    payload["model"] = fallback_model
+                    try:
+                        resp = requests.post(
+                            self.ollama_generate_url,
+                            json=payload,
+                            timeout=self.request_timeout,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        content = str(data.get("response", "")).strip()
+                        if content:
+                            return content
+                    except Exception as retry_error:
+                        logger.error(f"Ollama retry failed: {retry_error}")
+            logger.error(f"Ollama LLM error: {e}")
+            return self._fallback_payload()
+
+    def _generate_ai_response(self, prompt):
+        if self.mode == "online":
+            self._publish_backend_status("groq", "online mode")
+            try:
+                return self._groq_inference(prompt)
+            except Exception as exc:
+                logger.warning("Groq request failed in online mode; using fallback response: %s", exc)
+                return self._fallback_payload()
+
+        if self.mode == "offline":
+            self._publish_backend_status("ollama", "offline mode")
+            return self._ollama_inference(prompt)
+
+        if self.mode == "auto":
+            if self._groq_available():
+                self._publish_backend_status("groq", "Groq reachable")
+                try:
+                    return self._groq_inference(prompt)
+                except Exception as exc:
+                    logger.warning("Groq request failed after availability check; using fallback response: %s", exc)
+                    return self._fallback_payload()
+            self._publish_backend_status("ollama", "Groq unreachable")
+            return self._ollama_inference(prompt)
+
+        raise ValueError(f"Unknown AI mode: {self.mode}")
 
     def start(self):
         if hasattr(self.bus, "_ai_queue"):
@@ -86,6 +317,15 @@ class AIBrain:
 
     def stop(self):
         self._running = False
+        if self._ollama_process is not None and self._ollama_process.poll() is None:
+            try:
+                self._ollama_process.terminate()
+                self._ollama_process.wait(timeout=1)
+            except Exception:
+                try:
+                    self._ollama_process.kill()
+                except Exception:
+                    pass
         if hasattr(self.bus, "_ai_queue"):
             try:
                 while True:
@@ -134,9 +374,11 @@ class AIBrain:
             self._process_ai_request(text)
 
     def _process_ai_request(self, text):
+        offline_mode = self.mode == "offline"
         # Build context
         if hasattr(self.bus, "_memory_manager"):
-            context = self.bus._memory_manager.get_context()
+            context_limit = 4 if offline_mode else 8
+            context = self.bus._memory_manager.get_context(limit=context_limit)
             user_name = getattr(self.bus._memory_manager, "user_name", "")
         else:
             context = ""
@@ -157,7 +399,28 @@ class AIBrain:
             if owner_name
             else "Owner name is unknown. Never invent one."
         )
-        prompt = f"""You are {pet_name}, a living, emotionally expressive virtual pet.
+        if offline_mode:
+            prompt = f"""You are {pet_name}, a warm virtual pet.
+
+Reply as a single JSON object only.
+Use this shape:
+{{"text":"...","intent":"task|question|social|system","emotion_suggestion":"happy|sad|neutral|excited|thinking|sleepy","actions":[]}}
+
+Rules:
+- Be brief.
+- Never invent the owner's name.
+- Use the current mood to shape tone.
+- If the user gives a command, return intent "task" with ordered actions.
+- If not a command, respond naturally as a companion.
+
+Current mood: {current_mood}
+{owner_line}
+User message: "{text}"
+Context:
+{context}
+"""
+        else:
+            prompt = f"""You are {pet_name}, a living, emotionally expressive virtual pet.
 
 Role:
 - You are not a neutral assistant.
@@ -223,19 +486,7 @@ Example:
 {{{{"text":"Opening TextEdit and typing that now.","intent":"task","emotion_suggestion":"thinking","actions":[{{"step":1,"type":"open_app","target":"TextEdit"}},{{"step":2,"type":"type_text","text":"hello world"}}]}}}}
         """
         try:
-            if self.mode == "offline":
-                logger.info("AI offline mode active; bypassing Groq inference")
-                response = self._fallback_payload()
-            elif self.mode == "auto":
-                if self._groq_available():
-                    response = self._groq_inference(prompt)
-                else:
-                    logger.info("Groq unavailable; using offline fallback")
-                    response = self._fallback_payload()
-            elif self.mode == "online":
-                response = self._groq_inference(prompt)
-            else:
-                raise ValueError(f"Unknown AI mode: {self.mode}")
+            response = self._generate_ai_response(prompt)
             data = self._parse_model_response(response)
             payload = self._validate_payload(data)
             text_out = payload["text"]
@@ -398,10 +649,9 @@ Example:
     @profile
     def _groq_inference(self, prompt):
         if not REQUESTS_AVAILABLE:
-            return self._fallback_payload()
+            raise RuntimeError("requests is not available")
         if not self.groq_api_key:
-            logger.error("Groq API key missing; using fallback response")
-            return self._fallback_payload()
+            raise RuntimeError("Groq API key missing")
         payload = {
             "model": self.groq_model,
             "messages": [{"role": "user", "content": prompt}],
@@ -423,8 +673,10 @@ Example:
             if not choices:
                 raise ValueError("Groq response did not contain any choices")
             message = choices[0].get("message", {})
-            return str(message.get("content", "")).strip()
+            content = str(message.get("content", "")).strip()
+            if not content:
+                raise ValueError("Groq response did not contain message content")
+            return content
         except Exception as e:
             logger.error(f"Groq LLM error: {e}")
-            self.mode = "offline"
-            return self._fallback_payload()
+            raise

@@ -1,6 +1,6 @@
 # E-Pet
 
-E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, idle behavior, sound synthesis, a simple face window, voice input, and Groq-powered AI reasoning into one event-driven system.
+E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, idle behavior, sound synthesis, a simple face window, voice input, and AI reasoning through Groq online mode or Ollama offline mode in one event-driven system.
 
 ## Current Features
 
@@ -13,6 +13,7 @@ E-Pet is a plugin-based virtual pet built in Python. It combines a mood engine, 
 - Wake trigger via Whisper phrase detection and keyboard fallback
 - Speech-to-text via faster-whisper with microphone input
 - Groq Cloud AI reasoning in online mode
+- Ollama-based local AI reasoning in offline mode
 - AI-driven emotion suggestions
 - Text-to-speech via pyttsx3 with Piper support when available
 - Persistent facts and conversation history in SQLite
@@ -143,25 +144,32 @@ Important voice notes:
 
 ## AI Setup
 
-E-Pet now uses a single Groq Cloud online path for model-backed responses.
+E-Pet supports two model backends:
+
+- Groq for online inference
+- Ollama for offline/local inference
 
 Configure:
-- `ai.mode: auto` to let E-Pet choose Groq when reachable and fall back offline when not
-- `ai.mode: online` if you want it to try Groq every time and still fall back on failure
-- `ai.mode: offline` if you want no network calls at all
+- `ai.mode: online` to always prefer Groq
+- `ai.mode: offline` to use the local Ollama server
+- `ai.mode: auto` to try Groq first and fall back to Ollama if Groq is unavailable
 - `GROQ_API_KEY` environment variable, or `ai.groq_api_key` as a local fallback
 - `ai.groq_model: "llama-3.1-8b-instant"`
+- `ai.ollama_host: "http://localhost:11434"`
+- `ai.ollama_model: "phi3:mini"` or another fast Ollama model you already have pulled
+- `ai.ollama_keep_alive: "10m"` to keep the local model warm
+- `ai.ollama_temperature: 0.7` to control local response creativity
+- `ai.ollama_num_ctx: 1024` to keep the offline context smaller
+- `ai.ollama_num_predict: 96` to keep replies shorter and faster
 
-If you want the pet to run fully offline, set:
-- `ai.mode: offline`
+Online mode sends the prompt to Groq using the OpenAI-compatible chat-completions API.
+Offline mode calls the local Ollama server at `/api/generate` and uses the configured Ollama model.
+Auto mode checks Groq first and only starts Ollama when Groq is unreachable.
 
-In offline mode, no network call is made and the AI response falls back immediately, while the rest of the pet still runs normally.
-In auto mode, the app checks Groq reachability first and stays offline if it cannot connect.
+If you want the pet to run offline, make sure:
+- the Ollama daemon is running, or the `ollama` CLI is available so E-Pet can start it on demand
+- `ai.ollama_model` matches a model that exists on your machine
 
-The recommended low-latency model for this project is:
-- `llama-3.1-8b-instant`
-
-Groq uses an OpenAI-compatible chat-completions API, so the prompt-and-response flow stays simple and fast.
 For secrets, prefer setting `GROQ_API_KEY` in your shell or launcher rather than storing the key in `config.yaml`.
 
 ## Config
@@ -174,11 +182,13 @@ Recommended config values for a fresh clone:
 - `personality.name`: set your actual name
 - `voice.wake_mode: whisper` if you do not have a Porcupine access key
 - `voice.tts_model`: absolute path to your Piper voice model
-- `ai.mode`: `auto` is the safest default for automatic online/offline switching
+- `ai.mode`: `auto` is the safest default for automatic Groq/Ollama switching
 - `ai.mode`: `online` if you always want the app to try Groq first
-- `ai.mode`: `offline` for no-network fallback
+- `ai.mode`: `offline` if you want the local Ollama server to handle responses
 - `ai.groq_api_key`: leave blank if you are using `GROQ_API_KEY`
 - `ai.groq_model`: keep the default unless you want to try another Groq model
+- `ai.ollama_host`: keep the default unless your Ollama server is on another host
+- `ai.ollama_model`: set this to the local model you have installed in Ollama
 
 The default `config.yaml` is designed to run without hardware, using the simulator and the voice fallbacks.
 

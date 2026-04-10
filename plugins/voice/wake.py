@@ -84,6 +84,9 @@ class WakeWordDetector:
         self.audio_stream = None
         self._mode = "keyboard"
         self._last_wake_time = 0.0
+        self._read_error_count = 0
+        self._mic_lock = getattr(bus, "_mic_lock", None)
+        self._paused = threading.Event()
         self._configure_detector()
 
     def _configure_detector(self):
@@ -163,15 +166,46 @@ class WakeWordDetector:
         self._thread = threading.Thread(target=self._run)
         self._thread.daemon = True
         self._thread.start()
+        self.bus.subscribe("pet/voice/tts_state", self._on_tts_state)
 
     def stop(self):
         self._running = False
+        self._close_audio_resources()
         if self._thread:
             self._thread.join(timeout=1)
+        self._thread = None
+        self.porcupine = None
+        self.whisper_model = None
+
+    def pause_detection(self):
+        self._paused.set()
+
+    def resume_detection(self):
+        self._paused.clear()
+
+    def _on_tts_state(self, topic, data):
+        if not self._running:
+            return
+        state = str((data or {}).get("state", "")).strip().lower()
+        if state == "speaking":
+            self.pause_detection()
+        elif state in {"idle", "stopped", "error"}:
+            if getattr(self.bus, "_voice_followup_active", False):
+                self.pause_detection()
+                return
+            self.resume_detection()
+
+    def _close_audio_resources(self):
         if self.audio_stream and hasattr(self.audio_stream, "stop_stream"):
-            self.audio_stream.stop_stream()
+            try:
+                self.audio_stream.stop_stream()
+            except Exception:
+                pass
         if self.audio_stream and hasattr(self.audio_stream, "close"):
-            self.audio_stream.close()
+            try:
+                self.audio_stream.close()
+            except Exception:
+                pass
         if self.recorder and hasattr(self.recorder, "stop"):
             try:
                 self.recorder.stop()
@@ -183,22 +217,29 @@ class WakeWordDetector:
             except Exception:
                 pass
         if self.audio_interface and hasattr(self.audio_interface, "terminate"):
-            self.audio_interface.terminate()
+            try:
+                self.audio_interface.terminate()
+            except Exception:
+                pass
         if self.porcupine and hasattr(self.porcupine, "delete"):
-            self.porcupine.delete()
+            try:
+                self.porcupine.delete()
+            except Exception:
+                pass
+        self.audio_stream = None
+        self.recorder = None
+        self.audio_interface = None
+        self.porcupine = None
 
     def _run(self):
         if self._mode == "porcupine" and self.porcupine is not None and self.audio_stream is not None:
             # Real mic detection
             while self._running:
                 try:
-                    if self.recorder is not None:
-                        pcm = self.audio_stream.read()
-                    else:
-                        pcm = self.audio_stream.read(
-                            self.porcupine.frame_length,
-                            exception_on_overflow=False,
-                        )
+                    if self._paused.is_set():
+                        time.sleep(0.05)
+                        continue
+                    pcm = self._read_porcupine_frame()
                     if pcm:
                         keyword_index = self.porcupine.process(pcm)
                         if keyword_index >= 0:
@@ -207,20 +248,39 @@ class WakeWordDetector:
                                 "pet/input/wake_word",
                                 {"source": "mic", "wake_word": self.wake_word},
                             )
+                    self._read_error_count = 0
                 except Exception as e:
+                    if not self._running:
+                        break
+                    self._read_error_count += 1
                     logger.error(f"Error in audio loop: {e}")
+                    if self._read_error_count >= 2:
+                        logger.warning("Wake: disabling mic wake after repeated device read failures")
+                        self._running = False
+                        break
                 time.sleep(0.01)
         elif self._mode == "whisper":
             while self._running:
                 try:
+                    if self._paused.is_set():
+                        time.sleep(0.05)
+                        continue
                     if time.time() - self._last_wake_time < self.cooldown_seconds:
                         time.sleep(0.1)
                         continue
                     transcript = self._capture_and_transcribe_phrase()
                     if transcript and self._contains_wake_phrase(transcript):
                         self._publish_wake("mic", transcript)
+                    self._read_error_count = 0
                 except Exception as e:
+                    if not self._running:
+                        break
+                    self._read_error_count += 1
                     logger.error(f"Error in spoken wake loop: {e}")
+                    if self._read_error_count >= 2:
+                        logger.warning("Wake: disabling spoken mic wake after repeated device read failures")
+                        self._running = False
+                        break
                 time.sleep(self.check_interval)
         else:
             while self._running:
@@ -232,10 +292,49 @@ class WakeWordDetector:
             self.whisper_model = WhisperModel(self.wake_whisper_model, device="cpu", compute_type="int8")
             logger.info("Wake: model ready")
 
+    def _begin_mic_capture(self):
+        if self._mic_lock is None:
+            return True
+        while self._running:
+            try:
+                if self._mic_lock.acquire(timeout=0.1):
+                    return True
+            except Exception:
+                break
+        return False
+
+    def _end_mic_capture(self):
+        if self._mic_lock is None:
+            return
+        try:
+            self._mic_lock.release()
+        except Exception:
+            pass
+
+    def _read_porcupine_frame(self):
+        if self._mic_lock is None:
+            return self._read_porcupine_frame_unlocked()
+        if not self._begin_mic_capture():
+            return None
+        try:
+            return self._read_porcupine_frame_unlocked()
+        finally:
+            self._end_mic_capture()
+
+    def _read_porcupine_frame_unlocked(self):
+        if self.recorder is not None:
+            return self.audio_stream.read()
+        return self.audio_stream.read(
+            self.porcupine.frame_length,
+            exception_on_overflow=False,
+        )
+
     def _capture_and_transcribe_phrase(self):
         self._ensure_whisper_model_loaded()
         rate = 16000
         frames = []
+        if not self._begin_mic_capture():
+            return ""
         try:
             if self.recorder is not None:
                 frame_length = getattr(self.recorder, "frame_length", 1024)
@@ -244,7 +343,10 @@ class WakeWordDetector:
                     for _ in range(0, int(rate / frame_length * self.listen_seconds)):
                         frames.extend(self.audio_stream.read())
                 finally:
-                    self.recorder.stop()
+                    try:
+                        self.recorder.stop()
+                    except Exception:
+                        pass
             else:
                 if pyaudio is None:
                     raise RuntimeError("pyaudio backend is not available")
@@ -262,10 +364,16 @@ class WakeWordDetector:
                     for _ in range(0, int(rate / chunk * self.listen_seconds)):
                         frames.append(stream.read(chunk, exception_on_overflow=False))
                 finally:
-                    stream.stop_stream()
-                    stream.close()
+                    try:
+                        stream.stop_stream()
+                    except Exception:
+                        pass
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
         finally:
-            pass
+            self._end_mic_capture()
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             path = handle.name
