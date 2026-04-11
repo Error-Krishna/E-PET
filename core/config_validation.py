@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     },
     "logging": {
         "level": "INFO",
+        "file": "epet.log",
     },
     "event_bus": {
         "ordered": True,
@@ -43,6 +44,8 @@ DEFAULT_CONFIG = {
         "wake_word": "hey pip",
         "wake_mode": "auto",
         "wake_keyword": "computer",
+        "stt_backend": "auto",
+        "tts_backend": "piper",
         "porcupine_access_key": "",
         "porcupine_keyword_path": "",
         "piper_path": "piper",
@@ -51,8 +54,10 @@ DEFAULT_CONFIG = {
         "wake_whisper_model": "tiny",
         "record_seconds": 3,
         "wake_listen_seconds": 2,
+        "follow_up_listen_seconds": 2,
         "wake_check_interval": 0.3,
         "wake_cooldown_seconds": 4.0,
+        "mic_lock_timeout": 5.0,
         "interrupt_on_new_speech": True,
     },
     "ai": {
@@ -72,6 +77,7 @@ DEFAULT_CONFIG = {
         "max_history": 20,
         "persist_history": True,
         "extract_facts": True,
+        "db_path": "epet.db",
     },
 }
 
@@ -98,6 +104,8 @@ def normalize_and_validate_config(raw_config):
     if logging_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         logging_level = "INFO"
     config["logging"]["level"] = logging_level
+    log_file = str(config.get("logging", {}).get("file", "epet.log")).strip()
+    config["logging"]["file"] = log_file or "epet.log"
 
     if config["idle"]["bored_after"] < 0 or config["idle"]["sleepy_after"] < 0:
         raise ValueError("idle timeouts must be >= 0")
@@ -106,8 +114,12 @@ def normalize_and_validate_config(raw_config):
 
     config["voice"]["record_seconds"] = max(1, int(config["voice"]["record_seconds"]))
     config["voice"]["wake_listen_seconds"] = max(1, int(config["voice"]["wake_listen_seconds"]))
+    config["voice"]["follow_up_listen_seconds"] = max(1, int(config["voice"].get("follow_up_listen_seconds", config["voice"]["wake_listen_seconds"])))
     config["voice"]["wake_check_interval"] = max(0.1, float(config["voice"]["wake_check_interval"]))
     config["voice"]["wake_cooldown_seconds"] = max(0.5, float(config["voice"]["wake_cooldown_seconds"]))
+    config["voice"]["mic_lock_timeout"] = max(0.5, float(config["voice"].get("mic_lock_timeout", 5.0)))
+    config["voice"]["stt_backend"] = str(config["voice"].get("stt_backend", "auto")).strip() or "auto"
+    config["voice"]["tts_backend"] = str(config["voice"].get("tts_backend", "piper")).strip() or "piper"
     config["ai"]["request_timeout"] = max(5, int(config["ai"]["request_timeout"]))
     ordered = config.get("event_bus", {}).get("ordered", True)
     if isinstance(ordered, str):
@@ -148,5 +160,6 @@ def normalize_and_validate_config(raw_config):
     if isinstance(continue_on_failure, str):
         continue_on_failure = continue_on_failure.strip().lower() in {"1", "true", "yes", "on"}
     config["os_bridge"]["continue_on_failure"] = bool(continue_on_failure)
+    config["memory"]["db_path"] = str(config["memory"].get("db_path", "epet.db")).strip() or "epet.db"
 
     return config

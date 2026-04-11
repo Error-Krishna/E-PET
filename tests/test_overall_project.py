@@ -432,6 +432,20 @@ class TestPluginLoaderAndWiring(BaseOverallTest):
         self.assertIs(self.bus._stt, fake_stt)
         self.assertIs(self.bus._tts, fake_tts)
 
+    def test_voice_plugin_respects_disabled_flag(self):
+        cfg = json.loads(json.dumps(self.config))
+        cfg["voice"]["enabled"] = False
+        with mock.patch.object(voice_plugin, "WakeWordDetector") as wake_cls, \
+             mock.patch.object(voice_plugin, "SpeechToText") as stt_cls, \
+             mock.patch.object(voice_plugin, "TextToSpeech") as tts_cls:
+            voice_plugin.start(self.bus, self.hal, self.memory, cfg)
+        wake_cls.assert_not_called()
+        stt_cls.assert_not_called()
+        tts_cls.assert_not_called()
+        self.assertFalse(hasattr(self.bus, "_wake"))
+        self.assertFalse(hasattr(self.bus, "_stt"))
+        self.assertFalse(hasattr(self.bus, "_tts"))
+
     def test_os_bridge_plugin_respects_disabled_flag(self):
         cfg = json.loads(json.dumps(self.config))
         cfg["os_bridge"]["enabled"] = False

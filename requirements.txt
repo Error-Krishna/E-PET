@@ -1,4 +1,3 @@
-# Core runtime dependencies
 PyYAML>=6.0
 numpy>=1.26
 pygame>=2.6
@@ -10,11 +9,10 @@ pvrecorder>=1.2.4
 pyttsx3>=2.90
 streamlit>=1.37
 streamlit-autorefresh>=1.0.1
+PySide6>=6.6.0
+watchdog>=3.0
 
-# Voice enhancement packages
-# The project works with the default install, and these packages improve wake
-# words or audio quality on supported systems.
-#
+# Optional voice enhancements:
 # pvporcupine
 # pyaudio
 # piper-tts

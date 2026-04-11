@@ -74,9 +74,18 @@ class WakeWordDetector:
             "wake_whisper_model",
             self.voice_config.get("whisper_model", "tiny"),
         )
-        self.listen_seconds = max(1, int(self.voice_config.get("wake_listen_seconds", 2)))
+        self.listen_seconds = max(
+            1,
+            int(
+                self.voice_config.get(
+                    "follow_up_listen_seconds",
+                    self.voice_config.get("wake_listen_seconds", 2),
+                )
+            ),
+        )
         self.check_interval = float(self.voice_config.get("wake_check_interval", 0.3))
         self.cooldown_seconds = float(self.voice_config.get("wake_cooldown_seconds", 4.0))
+        self.mic_lock_timeout = max(0.5, float(self.voice_config.get("mic_lock_timeout", 5.0)))
         self.porcupine = None
         self.whisper_model = None
         self.recorder = None
@@ -295,12 +304,15 @@ class WakeWordDetector:
     def _begin_mic_capture(self):
         if self._mic_lock is None:
             return True
+        deadline = time.time() + self.mic_lock_timeout
         while self._running:
             try:
                 if self._mic_lock.acquire(timeout=0.1):
                     return True
             except Exception:
                 break
+            if time.time() >= deadline:
+                return False
         return False
 
     def _end_mic_capture(self):

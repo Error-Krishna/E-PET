@@ -79,3 +79,6 @@ tests/**/__pycache__/
 
 # Temporary conversation window / runtime artifacts
 conversation.log
+.epet_state.json
+.epet_cmd.json
+epet.log

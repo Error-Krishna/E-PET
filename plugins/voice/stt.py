@@ -52,6 +52,7 @@ class SpeechToText:
         self.voice_config = config.get("voice", {})
         self.model_name = self.voice_config.get("whisper_model", "tiny")
         self._mic_lock = getattr(bus, "_mic_lock", None)
+        self._mic_lock_timeout = max(0.5, float(self.voice_config.get("mic_lock_timeout", 5.0)))
         if WHISPER_AVAILABLE:
             try:
                 self.model = WhisperModel(self.model_name, device="cpu", compute_type="int8")
@@ -271,11 +272,14 @@ class SpeechToText:
     def _acquire_mic_lock(self):
         if self._mic_lock is None:
             return True
+        deadline = time.time() + self._mic_lock_timeout
         while self._running:
             try:
                 if self._mic_lock.acquire(timeout=0.1):
                     return True
             except Exception:
+                break
+            if time.time() >= deadline:
                 break
         return False
 
