@@ -65,6 +65,7 @@ class AIBrain:
         self._ollama_process = None
         self._resolved_ollama_model = None
         self._last_backend_status: tuple[str | None, str | None] = (None, None)
+        self._ollama_start_lock = threading.Lock()
 
         # Access to memory manager through bus? We'll use direct memory for now.
         # We'll assume memory manager is started and accessible via bus._memory_manager.
@@ -199,34 +200,37 @@ class AIBrain:
     def _start_ollama_server(self) -> bool:
         if self._ollama_available():
             return True
-        if self._ollama_process is not None and self._ollama_process.poll() is None:
-            return True
-
-        executable = resolve_executable("ollama")
-        if not executable:
-            logger.debug("Ollama executable not found on PATH")
-            return False
-
-        try:
-            self._ollama_process = subprocess.Popen(
-                [executable, "serve"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            logger.debug("Failed to start Ollama server: %s", exc)
-            self._ollama_process = None
-            return False
-
-        deadline = time.time() + min(10.0, float(self.request_timeout))
-        while time.time() < deadline:
+        with self._ollama_start_lock:
             if self._ollama_available():
-                logger.info("Ollama server ready at %s", self.ollama_host)
                 return True
-            time.sleep(0.25)
+            if self._ollama_process is not None and self._ollama_process.poll() is None:
+                return True
 
-        logger.warning("Ollama server did not become ready in time")
-        return False
+            executable = resolve_executable("ollama")
+            if not executable:
+                logger.debug("Ollama executable not found on PATH")
+                return False
+
+            try:
+                self._ollama_process = subprocess.Popen(
+                    [executable, "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                logger.debug("Failed to start Ollama server: %s", exc)
+                self._ollama_process = None
+                return False
+
+            deadline = time.time() + min(10.0, float(self.request_timeout))
+            while time.time() < deadline:
+                if self._ollama_available():
+                    logger.info("Ollama server ready at %s", self.ollama_host)
+                    return True
+                time.sleep(0.25)
+
+            logger.warning("Ollama server did not become ready in time")
+            return False
 
     def _ollama_inference(self, prompt):
         if not REQUESTS_AVAILABLE:

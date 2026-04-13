@@ -3,7 +3,8 @@ import os
 import time
 
 
-PROFILE_ENABLED = os.environ.get("EPET_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
+def _profile_enabled() -> bool:
+    return os.environ.get("EPET_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def profile(func):
@@ -12,7 +13,7 @@ def profile(func):
         start = time.perf_counter()
         result = func(*args, **kwargs)
         elapsed = time.perf_counter() - start
-        if PROFILE_ENABLED:
+        if _profile_enabled():
             print(f"[PROFILE] {func.__qualname__} took {elapsed:.3f}s")
         return result
     return wrapper

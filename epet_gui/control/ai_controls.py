@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTextEdit,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -83,8 +84,7 @@ class AIControls(QWidget):
         self._groq_model = QLineEdit()
         self._ollama_host = QLineEdit()
         self._ollama_model = QLineEdit()
-        self._ollama_fast = QLineEdit()
-        self._context = QLineEdit()
+        self._context = QSpinBox()
         self._prompt = QLineEdit()
         self._response = QTextEdit()
         self._response.setReadOnly(True)
@@ -96,7 +96,8 @@ class AIControls(QWidget):
         form.addRow("Groq Model", self._groq_model)
         form.addRow("Ollama Host", self._ollama_host)
         form.addRow("Ollama Model", self._ollama_model)
-        form.addRow("Preferred Fast Model", self._ollama_fast)
+        # The control panel intentionally exposes only the single Ollama model
+        # knob; the config schema does not have a separate fast-model setting.
         form.addRow("Max Context", self._context)
 
         groq_probe = QPushButton("Test Groq")
@@ -136,8 +137,9 @@ class AIControls(QWidget):
         self._groq_model.setText(str(ai.get("groq_model", "")))
         self._ollama_host.setText(str(ai.get("ollama_host", "")))
         self._ollama_model.setText(str(ai.get("ollama_model", "")))
-        self._ollama_fast.setText(str(ai.get("ollama_model", "")))
-        self._context.setText(str(ai.get("ollama_num_ctx", 1024)))
+        self._context.setRange(256, 8192)
+        self._context.setSingleStep(128)
+        self._context.setValue(int(ai.get("ollama_num_ctx", 1024)))
 
     def save(self):
         config = self.get_config()
@@ -147,7 +149,7 @@ class AIControls(QWidget):
         ai["groq_model"] = self._groq_model.text().strip()
         ai["ollama_host"] = self._ollama_host.text().strip()
         ai["ollama_model"] = self._ollama_model.text().strip()
-        ai["ollama_num_ctx"] = int(self._context.text() or 1024)
+        ai["ollama_num_ctx"] = int(self._context.value())
         self.save_config(config)
 
     def reload_from_config(self):

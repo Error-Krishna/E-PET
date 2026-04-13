@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
         "curiosity": 0.5,
         "energy": 0.6,
         "sociability": 0.5,
+        # Derived by the memory manager; not a user-editable config knob.
         "bond_level": 0.0,
         "name": "krishna",
     },
@@ -121,6 +122,7 @@ def normalize_and_validate_config(raw_config):
     config["voice"]["stt_backend"] = str(config["voice"].get("stt_backend", "auto")).strip() or "auto"
     config["voice"]["tts_backend"] = str(config["voice"].get("tts_backend", "piper")).strip() or "piper"
     config["ai"]["request_timeout"] = max(5, int(config["ai"]["request_timeout"]))
+    config["simulator"]["fps"] = max(1, int(config["simulator"].get("fps", 10)))
     ordered = config.get("event_bus", {}).get("ordered", True)
     if isinstance(ordered, str):
         ordered = ordered.strip().lower() in {"1", "true", "yes", "on"}

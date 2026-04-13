@@ -35,7 +35,7 @@ os_bridge:
   continue_on_failure: false
 voice:
   enabled: true
-  wake_word: hi bob
+  wake_word: Hi Bob
   wake_mode: whisper
   wake_keyword: computer
   stt_backend: auto
@@ -56,7 +56,7 @@ voice:
 ai:
   enabled: true
   mode: auto
-  groq_api_key:
+  groq_api_key: 
   groq_model: llama-3.1-8b-instant
   ollama_host: http://localhost:11434
   ollama_model: phi3:mini

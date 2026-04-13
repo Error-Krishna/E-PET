@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFormLayout,
     QGroupBox,
@@ -34,6 +35,8 @@ class PetControls(QWidget):
         self.send_command = send_command
         self._started_at = 0.0
         self._buffer = []
+        self._pending_plugin_enabled: set[str] | None = None
+        self._stop_requested = False
 
         self._status = QLabel("Stopped")
         self._pid = QLabel("-")
@@ -45,6 +48,11 @@ class PetControls(QWidget):
         self._process.readyReadStandardError.connect(self._drain_stderr)
         self._process.started.connect(self._on_started)
         self._process.finished.connect(self._on_finished)
+
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(200)
+        self._save_timer.timeout.connect(self._flush_plugin_toggle)
 
         top = QGroupBox("Pet Process")
         top_layout = QFormLayout(top)
@@ -58,6 +66,8 @@ class PetControls(QWidget):
             ("Stop E-Pet", self.stop_pet),
             ("Restart", self.restart_pet),
             ("Force Kill", self.kill_pet),
+            ("Stop GUI", self.stop_gui),
+            ("Restart GUI", self.restart_gui),
         ]:
             button = QPushButton(label)
             button.clicked.connect(action)
@@ -114,6 +124,9 @@ class PetControls(QWidget):
         self._process.start()
 
     def stop_pet(self):
+        # Ask the backend to exit cleanly, then terminate as a fallback in case
+        # the file-based command dispatch is delayed or the backend is stuck.
+        self._stop_requested = True
         self.send_command({"command": "quit", "args": {"source": "gui"}})
         if self._process.state() != QProcess.NotRunning:
             self._process.terminate()
@@ -125,8 +138,24 @@ class PetControls(QWidget):
         QTimer.singleShot(400, self.start_pet)
 
     def kill_pet(self):
+        self._stop_requested = True
         if self._process.state() != QProcess.NotRunning:
             self._process.kill()
+
+    def stop_gui(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def restart_gui(self):
+        main_path = self.project_root / "epet_gui" / "main.py"
+        started = QProcess.startDetached(sys.executable, ["-u", str(main_path)], str(self.project_root))
+        if not started:
+            QMessageBox.critical(self, "Restart Failed", "Could not relaunch E-Pet Control Center.")
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def publish_event(self):
         topic = self._topic.text().strip()
@@ -141,13 +170,21 @@ class PetControls(QWidget):
 
     def _toggle_plugin(self, plugin: str, checked: bool):
         config = self.get_config()
-        enabled = set(config.get("plugins", {}).get("enabled", []))
+        enabled = set(self._pending_plugin_enabled if self._pending_plugin_enabled is not None else config.get("plugins", {}).get("enabled", []))
         if checked:
             enabled.add(plugin)
         else:
             enabled.discard(plugin)
+        self._pending_plugin_enabled = enabled
+        self._save_timer.start()
+
+    def _flush_plugin_toggle(self):
+        if self._pending_plugin_enabled is None:
+            return
+        config = self.get_config()
         config.setdefault("plugins", {})
-        config["plugins"]["enabled"] = [name for name in PLUGIN_NAMES if name in enabled]
+        config["plugins"]["enabled"] = [name for name in PLUGIN_NAMES if name in self._pending_plugin_enabled]
+        self._pending_plugin_enabled = None
         self.save_config(config)
 
     def _sync_plugin_checks(self):
@@ -172,10 +209,17 @@ class PetControls(QWidget):
 
     def _on_started(self):
         self._started_at = time.time()
+        self._stop_requested = False
         self._status.setText("Running")
         self._pid.setText(str(self._process.processId()))
 
     def _on_finished(self, exit_code, exit_status):
+        if self._stop_requested:
+            self._status.setText("Stopped")
+            self._stop_requested = False
+            self._pid.setText("-")
+            return
+
         self._status.setText("Stopped" if exit_code == 0 else f"Exited ({exit_code})")
         self._pid.setText("-")
         if exit_code != 0:

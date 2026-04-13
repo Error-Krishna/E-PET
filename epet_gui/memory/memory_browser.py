@@ -195,6 +195,8 @@ class MemoryBrowser(QWidget):
         self.refresh_events()
 
     def set_db_path(self, db_path: Path):
+        # Each query opens its own SQLite connection, so swapping the path is
+        # safe even while earlier jobs are finishing in the GUI thread.
         self.db_path = Path(db_path)
         self.refresh_all()
 
@@ -234,6 +236,8 @@ class MemoryBrowser(QWidget):
         self._active_jobs.append((thread, worker))
 
         def _drop_job():
+            # Signal delivery lands back on the GUI thread, so this cleanup does
+            # not need an explicit lock even with several overlapping queries.
             self._active_jobs[:] = [
                 job for job in self._active_jobs if job[0] is not thread and job[1] is not worker
             ]

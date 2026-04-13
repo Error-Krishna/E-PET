@@ -45,6 +45,8 @@ class VoiceControls(QWidget):
         self._mic_lock_timeout.setDecimals(1)
 
         form = QFormLayout()
+        # Quick-access subset: the full Config editor exposes the advanced
+        # voice timing and wake tuning fields.
         form.addRow("Wake Word", self._wake_word)
         form.addRow("Wake Enabled", self._wake_enabled)
         form.addRow("Wake Mode", self._wake_mode)
@@ -87,6 +89,8 @@ class VoiceControls(QWidget):
         self._wake_status.setText("Listening" if self._wake_enabled.isChecked() else "Inactive")
         self._set_combo(self._stt_backend, str(voice.get("stt_backend", "auto")))
         self._set_combo(self._tts_backend, str(voice.get("tts_backend", "piper")))
+        # Older configs used wake_listen_seconds before follow_up_listen_seconds
+        # was added, so keep the fallback for backward compatibility.
         self._follow_up.setValue(int(voice.get("follow_up_listen_seconds", voice.get("wake_listen_seconds", 2))))
         self._mic_lock_timeout.setValue(float(voice.get("mic_lock_timeout", 5.0)))
 
@@ -98,7 +102,7 @@ class VoiceControls(QWidget):
     def save(self):
         config = self.get_config()
         config.setdefault("voice", {})
-        config["voice"]["wake_word"] = self._wake_word.text().strip() or "hello"
+        config["voice"]["wake_word"] = self._wake_word.text().strip() or "hey pip"
         config["voice"]["enabled"] = self._wake_enabled.isChecked()
         config["voice"]["wake_mode"] = self._wake_mode.currentText()
         config["voice"]["stt_backend"] = self._stt_backend.currentText()

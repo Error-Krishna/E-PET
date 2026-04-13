@@ -169,9 +169,13 @@ def main():
                 with runtime_lock:
                     snapshot = dict(runtime_state)
                 plugin_names = ["emotion", "sound", "idle", "os_bridge", "voice", "ai"]
+                try:
+                    mood = memory.get("current_mood") or hal.get_state().get("face", "neutral")
+                except Exception:
+                    mood = hal.get_state().get("face", "neutral")
                 state = build_runtime_state(
                     running=True,
-                    mood=memory.get("current_mood") or hal.get_state().get("face", "neutral"),
+                    mood=mood,
                     ai_mode=config.get("ai", {}).get("mode", "auto"),
                     voice_state=snapshot.get("voice_state", "idle"),
                     last_speech=snapshot.get("last_speech", ""),
@@ -198,6 +202,8 @@ def main():
                     logger.info("GUI command processed: %s (%s)", command.get("command", ""), result)
                 except Exception as exc:
                     logger.error("GUI command failed: %s", exc)
+            # 100 ms polling keeps GUI command latency below a human-noticeable
+            # threshold while only costing a handful of stat() checks per second.
             time.sleep(0.1)
 
     start_time = time.time()

@@ -21,10 +21,13 @@ def project_root() -> Path:
 
 
 def state_file_path(root: Path | None = None) -> Path:
+    # File-based IPC only works when the GUI and backend share the same
+    # filesystem. A socket transport is needed for multi-machine support.
     return (root or project_root()) / STATE_FILENAME
 
 
 def command_file_path(root: Path | None = None) -> Path:
+    # Same shared-filesystem requirement as state_file_path().
     return (root or project_root()) / COMMAND_FILENAME
 
 
@@ -89,8 +92,8 @@ def remove_file_safely(path: Path) -> None:
         pass
 
 
-def collect_memory_stats(memory) -> Dict[str, int]:
-    stats = {
+def collect_memory_stats(memory) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {
         "facts_total": 0,
         "conversation_count": 0,
         "event_count": 0,
@@ -101,6 +104,9 @@ def collect_memory_stats(memory) -> Dict[str, int]:
         return stats
 
     try:
+        # This function intentionally reads the SQLite connection under the
+        # memory object's private lock. Do not call it while holding the public
+        # Memory API lock on another thread.
         with memory._lock:  # noqa: SLF001 - read-only status snapshot for GUI
             cursor = memory.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM memories WHERE category = 'facts'")
@@ -193,7 +199,7 @@ def dispatch_command(bus, payload: Dict[str, Any], logger=None) -> str:
         return "missing_text"
 
     if command == "trigger_wake":
-        bus.publish("pet/input/wake_word", {"source": args.get("source", "gui"), "wake_word": args.get("wake_word", "hello")})
+        bus.publish("pet/input/wake_word", {"source": args.get("source", "gui"), "wake_word": args.get("wake_word", "hey pip")})
         return "ok"
 
     if command == "publish_event":
@@ -207,6 +213,8 @@ def dispatch_command(bus, payload: Dict[str, Any], logger=None) -> str:
     if command == "reload_config":
         if logger:
             logger.info("GUI requested config reload; restart the pet process to apply changes")
+        # Hot reload could re-read config.yaml and reinitialize affected
+        # plugins, but the current runtime treats restart as the safe path.
         return "ok"
 
     if command == "quit":

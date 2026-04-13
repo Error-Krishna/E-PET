@@ -197,6 +197,8 @@ class StreamlitBackend:
             return
         self._cleanup_done = True
 
+        # Keep this list explicit so shutdown order stays predictable; update
+        # it whenever a new bus-owned plugin attribute is introduced.
         for attr in ["_tts", "_stt", "_wake", "_brain", "_memory_manager", "_idle_tick", "_sound_engine", "_emotion_engine"]:
             if self.bus is not None and hasattr(self.bus, attr):
                 try:
