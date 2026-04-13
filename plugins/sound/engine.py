@@ -1,4 +1,5 @@
 import logging
+import queue
 import threading
 import time
 from typing import Dict, Callable
@@ -25,6 +26,9 @@ class SoundEngine:
         self.config = config
         self._running = True
         self.audio_enabled = SOUND_AVAILABLE
+        self._sound_thread = None
+        self._play_queue: queue.Queue[str | None] = queue.Queue(maxsize=32)
+        self._mixer_ready = threading.Event()
 
         # Sound generators: mapping name -> function that returns a numpy array of samples
         self.sounds: Dict[str, Callable[[], np.ndarray]] = {
@@ -42,29 +46,38 @@ class SoundEngine:
             "shutdown": self._shutdown,
         }
 
+        self._sound_cache = {}
         if self.audio_enabled:
-            try:
-                pygame.mixer.init(frequency=22050, size=-16, channels=1)
-                self._sound_cache = {}
-                self._preload_sounds()
-                logger.info("Sound: audio ready")
-            except pygame.error as e:
-                self.audio_enabled = False
-                self._sound_cache = {}
-                logger.info("Sound: silent mode")
+            logger.info("Sound: audio pending initialization")
         else:
-            self._sound_cache = {}
             logger.info("Sound: silent mode")
 
     def start(self):
         self.bus.subscribe("pet/sound/play", self._on_play_sound)
         self.bus.subscribe("pet/emotion/changed", self._on_emotion_changed)
+        if self._sound_thread is None or not self._sound_thread.is_alive():
+            self._mixer_ready.clear()
+            self._sound_thread = threading.Thread(target=self._sound_loop, daemon=True)
+            self._sound_thread.start()
+            self._mixer_ready.wait(timeout=2)
         logger.info("Sound: ready")
 
     def stop(self):
         self._running = False
-        if self.audio_enabled:
-            pygame.mixer.quit()
+        try:
+            self._play_queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self._play_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._play_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if self._sound_thread is not None:
+            self._sound_thread.join(timeout=2)
+            self._sound_thread = None
 
     def _on_play_sound(self, topic, data):
         data = unwrap_event_payload(data)
@@ -84,21 +97,44 @@ class SoundEngine:
 
     def _play_sound(self, name):
         """Generate and play sound in a separate thread to avoid blocking."""
-        if not self.audio_enabled:
-            logger.debug(f"Sound queued (silent mode): {name}")
-            return
-        def play():
-            try:
+        self._play_queue.put_nowait(name)
+
+    def _sound_loop(self):
+        try:
+            if self.audio_enabled:
+                try:
+                    pygame.mixer.init(frequency=22050, size=-16, channels=1)
+                    self._preload_sounds()
+                    logger.info("Sound: audio ready")
+                except Exception as exc:
+                    self.audio_enabled = False
+                    self._sound_cache = {}
+                    logger.info("Sound: silent mode (%s)", exc)
+            self._mixer_ready.set()
+
+            while self._running:
+                try:
+                    name = self._play_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if name is None:
+                    break
+                if not self.audio_enabled:
+                    continue
                 sound = self._sound_cache.get(name, self._sound_cache.get("neutral"))
                 if sound is None:
                     logger.debug(f"No cached sound available for {name}")
-                    return
-                sound.play()
-            except Exception as e:
-                logger.error(f"Error playing sound {name}: {e}")
-        thread = threading.Thread(target=play)
-        thread.daemon = True
-        thread.start()
+                    continue
+                try:
+                    sound.play()
+                except Exception as exc:
+                    logger.error(f"Error playing sound {name}: {exc}")
+        finally:
+            if SOUND_AVAILABLE and pygame.mixer.get_init():
+                try:
+                    pygame.mixer.quit()
+                except Exception:
+                    pass
 
     def _preload_sounds(self):
         for name, generator in self.sounds.items():

@@ -23,6 +23,8 @@ def _is_likely_gui_shell() -> bool:
 
 
 def _preflight_environment() -> None:
+    if os.environ.get("EPET_GUI_FORCE_LAUNCH"):
+        return
     if not _is_likely_gui_shell():
         print(
             "E-Pet GUI cannot start from this shell session on macOS.\n"

@@ -205,7 +205,7 @@ class EpetControlCenter(QMainWindow):
         self.statusBar().showMessage("Config saved", 2000)
 
     def _apply_config(self, config):
-        self.config = normalize_and_validate_config(config)
+        self.config = config
         self.log_path = resolve_log_file_path(self.config, self.config_path)
         self.db_path = self._resolve_db_path()
         self.log_viewer.set_log_path(self.log_path)

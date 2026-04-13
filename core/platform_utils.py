@@ -36,6 +36,8 @@ def resolve_executable(command: str | os.PathLike[str]) -> str | None:
     Accepts either a bare command name or a filesystem path. On Windows we also
     try a .exe suffix when the bare name is not present on PATH.
     """
+    # This is for real executables, not GUI app bundle names that may contain
+    # spaces; those are handled by the OS bridge instead.
     candidate = Path(command).expanduser()
     if candidate.exists():
         return str(candidate)
@@ -50,4 +52,3 @@ def resolve_executable(command: str | os.PathLike[str]) -> str | None:
             return resolved
 
     return None
-

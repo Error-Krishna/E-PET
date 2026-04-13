@@ -31,6 +31,8 @@ class StatePollWorker(QObject):
     @Slot()
     def start(self):
         self._timer = QTimer(self)
+        # Poll slightly faster than the backend writes so the dashboard feels
+        # responsive; the JSON file is tiny, so this synchronous read is cheap.
         self._timer.setInterval(self.interval_ms)
         self._timer.timeout.connect(self._poll)
         self._timer.start()

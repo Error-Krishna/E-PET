@@ -116,21 +116,34 @@ class ConfigEditor(QWidget):
                 self.on_saved(normalized)
             if self.is_pet_running():
                 QMessageBox.warning(self, "Restart Required", "Config saved. Restart the pet to apply changes.")
+        except RuntimeError as exc:
+            if "already deleted" not in str(exc):
+                QMessageBox.critical(self, "Save Failed", f"Could not save config.yaml:\n{exc}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", f"Could not save config.yaml:\n{exc}")
 
     def _show_saved_notice(self):
-        self._save_notice.setText("Saved ✓")
-        self._save_notice.show()
-        QTimer.singleShot(2000, self._save_notice.hide)
+        try:
+            self._save_notice.setText("Saved ✓")
+            self._save_notice.show()
+        except RuntimeError:
+            return
+
+        def _safe_hide():
+            try:
+                self._save_notice.hide()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(2000, _safe_hide)
 
     def _build_form(self):
         while self._body_layout.count():
             item = self._body_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget is not self._save_notice:
                 widget.deleteLater()
-        self._body_layout.addWidget(self._save_notice)
+        self._body_layout.insertWidget(0, self._save_notice)
         self._widgets.clear()
         self._plugin_checks.clear()
 

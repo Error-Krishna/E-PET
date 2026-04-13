@@ -159,6 +159,9 @@ class SpeechToText:
         if wake is not None and hasattr(wake, "pause_detection"):
             wake.pause_detection()
         try:
+            if self.recorder is None and self.audio is None:
+                logger.debug("STT: no audio backend available, skipping record")
+                return
             if self.recorder is not None:
                 frame_length = getattr(self.recorder, "frame_length", 1024)
                 logger.info("STT: recording")

@@ -52,6 +52,8 @@ class LogTailWorker(QObject):
             self._watcher.addPath(str(self.log_path))
         parent = str(self.log_path.parent)
         if parent and parent not in self._watcher.directories():
+            # The directory watcher is a coarse fallback on macOS; the 500 ms
+            # poll still does the authoritative tailing work.
             self._watcher.addPath(parent)
         self._poll()
 
@@ -93,7 +95,7 @@ class LogTailWorker(QObject):
         try:
             stat = self.log_path.stat()
             inode = getattr(stat, "st_ino", None)
-            if self._inode is not None and inode != self._inode:
+            if self._inode is not None and self._inode != 0 and inode != self._inode:
                 self._open_log(initial=False)
             if self._fh is None:
                 self._open_log(initial=False)
@@ -116,10 +118,14 @@ class LogViewer(QWidget):
         self.on_log_path_changed = on_log_path_changed
         self._buffer = deque(maxlen=10000)
         self._level_filter = {"DEBUG": True, "INFO": True, "WARNING": True, "ERROR": True, "CRITICAL": True}
+        self._rerender_timer = QTimer(self)
+        self._rerender_timer.setSingleShot(True)
+        self._rerender_timer.setInterval(150)
+        self._rerender_timer.timeout.connect(self._rerender)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Filter keyword or regex...")
-        self._search.textChanged.connect(self._rerender)
+        self._search.textChanged.connect(self._schedule_rerender)
 
         self._path_label = QLabel(str(self.log_path))
         self._status = QLabel("Waiting for log file...")
@@ -175,7 +181,10 @@ class LogViewer(QWidget):
 
     def _set_level(self, level: str, checked: bool):
         self._level_filter[level] = checked
-        self._rerender()
+        self._schedule_rerender()
+
+    def _schedule_rerender(self):
+        self._rerender_timer.start()
 
     def _copy_all(self):
         QApplication.clipboard().setText("\n".join(self._buffer))
@@ -206,10 +215,15 @@ class LogViewer(QWidget):
             self._insert_line(line)
 
     def _rerender(self):
-        self._text.clear()
-        for line in self._buffer:
-            if self._passes_filter(line):
-                self._insert_line(line)
+        self._text.setUpdatesEnabled(False)
+        try:
+            self._text.clear()
+            for line in self._buffer:
+                if self._passes_filter(line):
+                    self._insert_line(line)
+        finally:
+            self._text.setUpdatesEnabled(True)
+            self._text.ensureCursorVisible()
 
     def _passes_filter(self, line: str) -> bool:
         if not line:
@@ -235,13 +249,12 @@ class LogViewer(QWidget):
         if "CRITICAL" in line:
             fmt.setFontWeight(700)
         cursor.insertText(line + "\n", fmt)
-        self._text.setTextCursor(cursor)
         if self._auto_scroll():
             self._text.ensureCursorVisible()
 
     def _auto_scroll(self) -> bool:
         bar = self._text.verticalScrollBar()
-        return bar.value() >= bar.maximum() - 2
+        return bar.value() >= bar.maximum() - (bar.pageStep() // 2)
 
 
 def _extract_level(line: str) -> str:

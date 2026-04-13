@@ -82,3 +82,4 @@ conversation.log
 .epet_state.json
 .epet_cmd.json
 epet.log
+epet-clean/

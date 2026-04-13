@@ -143,7 +143,6 @@ class WakeWordDetector:
         if not WHISPER_WAKE_AVAILABLE:
             return False
         try:
-            self._init_recorder(frame_length=1024)
             self._mode = "whisper"
             logger.info(f"Wake: Whisper phrase '{self.wake_word}' ({self.wake_whisper_model})")
             return True
@@ -274,6 +273,8 @@ class WakeWordDetector:
                     if self._paused.is_set():
                         time.sleep(0.05)
                         continue
+                    # Cooldown prevents the wake loop from re-triggering on the
+                    # pet's own response audio after follow-up listening ends.
                     if time.time() - self._last_wake_time < self.cooldown_seconds:
                         time.sleep(0.1)
                         continue
@@ -348,6 +349,12 @@ class WakeWordDetector:
         if not self._begin_mic_capture():
             return ""
         try:
+            if self.recorder is None and self.audio_stream is None:
+                try:
+                    self._init_recorder(frame_length=1024)
+                except Exception as exc:
+                    logger.debug(f"Wake: deferred recorder init failed: {exc}")
+                    return ""
             if self.recorder is not None:
                 frame_length = getattr(self.recorder, "frame_length", 1024)
                 self.recorder.start()
