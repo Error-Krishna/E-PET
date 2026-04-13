@@ -55,8 +55,8 @@ voice:
   interrupt_on_new_speech: true
 ai:
   enabled: true
-  mode: auto
-  groq_api_key: 
+  mode: online
+  groq_api_key:
   groq_model: llama-3.1-8b-instant
   ollama_host: http://localhost:11434
   ollama_model: phi3:mini

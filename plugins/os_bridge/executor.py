@@ -4,14 +4,15 @@ import threading
 import time
 from typing import Any, Dict
 
-from .actions.apps import open_app, resolve_open_app_candidates
-from .actions.keyboard import hotkey, press, type_text
+from .actions.apps import open_app, open_url, resolve_open_app_candidates
+from .actions.keyboard import hotkey, press, save_file, type_text
+from .actions.screen import read_screen
 
 logger = logging.getLogger(__name__)
 
 
 class OSBridgeExecutor:
-    SUPPORTED_ACTIONS = {"open_app", "type_text", "press", "hotkey"}
+    SUPPORTED_ACTIONS = {"open_app", "open_url", "type_text", "press", "hotkey", "save_file", "read_screen"}
     DEFAULT_MAX_RETRIES = 2
 
     def __init__(self, bus, hal, memory, config):
@@ -26,14 +27,19 @@ class OSBridgeExecutor:
         self.max_retries = max(0, int(os_config.get("max_retries", self.DEFAULT_MAX_RETRIES)))
         self.retry_delay = max(0.0, float(os_config.get("retry_delay", 0.15)))
         self.continue_on_failure = bool(os_config.get("continue_on_failure", False))
+        self.verify_after_actions = bool(os_config.get("verify_after_actions", False))
+        self.verification_delay = max(0.0, float(os_config.get("verification_delay", 0.75)))
         self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         self._task_states: Dict[str, Dict[str, Any]] = {}
         self._state_lock = threading.Lock()
         self._action_registry = {
             "open_app": self._handle_open_app,
+            "open_url": self._handle_open_url,
             "type_text": self._handle_type_text,
             "press": self._handle_press,
             "hotkey": self._handle_hotkey,
+            "save_file": self._handle_save_file,
+            "read_screen": self._handle_read_screen,
         }
 
     def start(self):
@@ -140,10 +146,12 @@ class OSBridgeExecutor:
 
             success = False
             last_error = None
+            action_result = None
             attempts = self.max_retries + 1
             for attempt in range(1, attempts + 1):
                 try:
-                    self._execute_action(normalized_action, attempt=attempt)
+                    action_result = self._execute_action(normalized_action, attempt=attempt)
+                    self._verify_action(normalized_action, action_result)
                     success = True
                     break
                 except Exception as exc:
@@ -162,14 +170,14 @@ class OSBridgeExecutor:
 
             if success:
                 logger.info("[TASK] step %s completed", step)
-                self._update_task_state(task_id, "running", step, description)
-                self._publish_status(task_id, step, "completed", message=description)
+                self._update_task_state(task_id, "running", step, description, result=action_result)
+                self._publish_status(task_id, step, "completed", message=description, result=action_result)
             else:
                 error_text = str(last_error) if last_error else "step failed"
                 logger.error("[ERROR] step failed task=%s step=%s: %s", task_id, step, error_text)
                 task_failed = True
-                self._update_task_state(task_id, "failed", step, error_text)
-                self._publish_status(task_id, step, "failed", error_text, message=description)
+                self._update_task_state(task_id, "failed", step, error_text, result=action_result)
+                self._publish_status(task_id, step, "failed", error_text, message=description, result=action_result)
                 if not self.continue_on_failure:
                     break
 
@@ -179,7 +187,13 @@ class OSBridgeExecutor:
         final_state = self.get_task_state(task_id)
         final_status = "failed" if task_failed else "completed"
         final_message = final_state.get("message", "task finished")
-        self._update_task_state(task_id, final_status, final_state.get("current_step", len(actions)), final_message)
+        self._update_task_state(
+            task_id,
+            final_status,
+            final_state.get("current_step", len(actions)),
+            final_message,
+            result=final_state.get("result"),
+        )
 
     def _normalize_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         action_type = str(action.get("type", "")).strip()
@@ -199,6 +213,11 @@ class OSBridgeExecutor:
                 raise ValueError("open_app requires a target app name")
             normalized["target"] = target
             normalized["candidates"] = resolve_open_app_candidates(target)
+        elif action_type == "open_url":
+            url = str(action.get("url") or action.get("target") or "").strip()
+            if not url:
+                raise ValueError("open_url requires a url")
+            normalized["url"] = url
         elif action_type == "type_text":
             text = str(action.get("text", ""))
             if not text:
@@ -219,6 +238,19 @@ class OSBridgeExecutor:
             if not key_tuple:
                 raise ValueError("hotkey requires at least one key")
             normalized["keys"] = key_tuple
+        elif action_type == "save_file":
+            filename = str(action.get("filename") or action.get("target") or "").strip()
+            if not filename:
+                raise ValueError("save_file requires a filename")
+            normalized["filename"] = filename
+        elif action_type == "read_screen":
+            region = action.get("region")
+            if region is not None:
+                normalized["region"] = self._normalize_region(region)
+
+        verification = self._normalize_verification(action)
+        if verification is not None:
+            normalized["verify"] = verification
         return normalized
 
     def _execute_action(self, action: Dict[str, Any], attempt: int = 1):
@@ -239,6 +271,12 @@ class OSBridgeExecutor:
         if candidate != action.get("target"):
             logger.info("[TASK] open_app fallback -> %s", candidate)
         open_app(candidate)
+
+    def _handle_open_url(self, action: Dict[str, Any], attempt: int = 1):
+        url = str(action.get("url", "")).strip()
+        if not url:
+            raise ValueError("open_url requires a url")
+        open_url(url)
 
     def _handle_type_text(self, action: Dict[str, Any], attempt: int = 1):
         text = str(action.get("text", ""))
@@ -261,13 +299,113 @@ class OSBridgeExecutor:
             raise ValueError("hotkey requires at least one key")
         hotkey(*cleaned)
 
-    def _update_task_state(self, task_id: str, status: str, current_step: int, message: str):
+    def _handle_save_file(self, action: Dict[str, Any], attempt: int = 1):
+        filename = str(action.get("filename", "")).strip()
+        if not filename:
+            raise ValueError("save_file requires a filename")
+        save_file(filename)
+
+    def _handle_read_screen(self, action: Dict[str, Any], attempt: int = 1):
+        region = action.get("region")
+        if region is not None:
+            return read_screen(region=self._normalize_region(region))
+        return read_screen()
+
+    def _normalize_region(self, region: Any):
+        if isinstance(region, dict):
+            keys = ("left", "top", "width", "height")
+            if all(key in region for key in keys):
+                return tuple(int(region[key]) for key in keys)
+        if isinstance(region, (list, tuple)) and len(region) == 4:
+            return tuple(int(value) for value in region)
+        raise ValueError("region must contain left, top, width, and height")
+
+    def _normalize_verification(self, action: Dict[str, Any]) -> Dict[str, Any] | None:
+        verify = action.get("verify")
+        expected_text = str(action.get("expected_text", "")).strip()
+        expected_contains = str(action.get("expected_contains", "")).strip()
+
+        if verify is None and not expected_text and not expected_contains:
+            return None
+
+        normalized: Dict[str, Any] = {}
+        if isinstance(verify, dict):
+            verify_text = str(verify.get("expected_text") or verify.get("text") or "").strip()
+            verify_contains = str(verify.get("expected_contains") or verify.get("contains") or "").strip()
+            if verify_text:
+                normalized["expected_text"] = verify_text
+            if verify_contains:
+                normalized["expected_contains"] = verify_contains
+        elif isinstance(verify, str):
+            normalized["expected_contains"] = verify.strip()
+        elif verify:
+            normalized["enabled"] = True
+
+        if expected_text:
+            normalized["expected_text"] = expected_text
+        if expected_contains:
+            normalized["expected_contains"] = expected_contains
+        if not normalized:
+            normalized["enabled"] = bool(verify)
+        return normalized
+
+    def _verify_action(self, action: Dict[str, Any], action_result: Any):
+        verification = action.get("verify")
+        action_type = action.get("type")
+        if verification is None and action_type != "read_screen" and not self.verify_after_actions:
+            return None
+
+        if action_type == "read_screen":
+            if not isinstance(verification, dict) or not verification:
+                return action_result
+            screen_text = str((action_result or {}).get("text", "")).strip()
+            expected_text = str(verification.get("expected_text", "")).strip()
+            expected_contains = str(verification.get("expected_contains", "")).strip()
+            if expected_text and screen_text != expected_text:
+                raise RuntimeError(f"screen text did not match expected text: {expected_text!r}")
+            if expected_contains and expected_contains not in screen_text:
+                raise RuntimeError(f"screen text did not contain expected text: {expected_contains!r}")
+            return action_result
+
+        if verification is None and self.verify_after_actions:
+            verification = {"enabled": True}
+
+        if not verification:
+            return None
+
+        if self.verification_delay > 0:
+            time.sleep(self.verification_delay)
+
+        region = action.get("region")
+        try:
+            if isinstance(region, (list, tuple, dict)):
+                screen_result = read_screen(region=self._normalize_region(region))
+            else:
+                screen_result = read_screen()
+        except Exception as exc:
+            if action.get("type") == "read_screen" or verification.get("expected_text") or verification.get("expected_contains"):
+                raise
+            logger.warning("[OS] screen verification skipped: %s", exc)
+            return None
+
+        screen_text = str((screen_result or {}).get("text", "")).strip()
+        expected_text = str(verification.get("expected_text", "")).strip()
+        expected_contains = str(verification.get("expected_contains", "")).strip()
+        if expected_text and screen_text != expected_text:
+            raise RuntimeError(f"screen text did not match expected text: {expected_text!r}")
+        if expected_contains and expected_contains not in screen_text:
+            raise RuntimeError(f"screen text did not contain expected text: {expected_contains!r}")
+        return {"text": screen_text}
+
+    def _update_task_state(self, task_id: str, status: str, current_step: int, message: str, result: Any | None = None):
         state = {
             "task_id": task_id,
             "status": status,
             "current_step": int(current_step or 0),
             "message": message,
         }
+        if result is not None:
+            state["result"] = result
         with self._state_lock:
             self._task_states[task_id] = state
 
@@ -279,15 +417,21 @@ class OSBridgeExecutor:
         action_type = action.get("type")
         if action_type == "open_app":
             return f"opening {action.get('target')}"
+        if action_type == "open_url":
+            return f"opening url {action.get('url')}"
         if action_type == "type_text":
             return "typing text"
         if action_type == "press":
             return f"pressing {action.get('key')}"
         if action_type == "hotkey":
             return f"hotkey {'+'.join(action.get('keys', []))}"
+        if action_type == "save_file":
+            return f"saving file as {action.get('filename')}"
+        if action_type == "read_screen":
+            return "reading screen"
         return "running action"
 
-    def _publish_status(self, task_id: str, step: int, status: str, error: str | None = None, message: str | None = None):
+    def _publish_status(self, task_id: str, step: int, status: str, error: str | None = None, message: str | None = None, result: Any | None = None):
         payload = {
             "task_id": task_id,
             "step": step,
@@ -298,4 +442,6 @@ class OSBridgeExecutor:
             payload["message"] = message
         if error:
             payload["error"] = error
+        if result is not None:
+            payload["result"] = result
         self.bus.publish("pet/task/status", payload)

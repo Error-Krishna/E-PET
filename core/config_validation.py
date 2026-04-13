@@ -39,6 +39,8 @@ DEFAULT_CONFIG = {
         "max_retries": 2,
         "retry_delay": 0.15,
         "continue_on_failure": False,
+        "verify_after_actions": False,
+        "verification_delay": 0.75,
     },
     "voice": {
         "enabled": True,
@@ -162,6 +164,11 @@ def normalize_and_validate_config(raw_config):
     if isinstance(continue_on_failure, str):
         continue_on_failure = continue_on_failure.strip().lower() in {"1", "true", "yes", "on"}
     config["os_bridge"]["continue_on_failure"] = bool(continue_on_failure)
+    verify_after_actions = config["os_bridge"].get("verify_after_actions", False)
+    if isinstance(verify_after_actions, str):
+        verify_after_actions = verify_after_actions.strip().lower() in {"1", "true", "yes", "on"}
+    config["os_bridge"]["verify_after_actions"] = bool(verify_after_actions)
+    config["os_bridge"]["verification_delay"] = max(0.0, float(config["os_bridge"].get("verification_delay", 0.75)))
     config["memory"]["db_path"] = str(config["memory"].get("db_path", "epet.db")).strip() or "epet.db"
 
     return config

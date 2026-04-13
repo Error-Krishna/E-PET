@@ -104,6 +104,8 @@ CONFIG_SCHEMA = {
             {"path": ("os_bridge", "max_retries"), "label": "Max Retries", "type": "int", "default": _default("os_bridge", "max_retries"), "min": 0, "max": 10, "step": 1},
             {"path": ("os_bridge", "retry_delay"), "label": "Retry Delay", "type": "float", "default": _default("os_bridge", "retry_delay"), "min": 0.0, "max": 5.0, "step": 0.05},
             {"path": ("os_bridge", "continue_on_failure"), "label": "Continue On Failure", "type": "bool", "default": _default("os_bridge", "continue_on_failure")},
+            {"path": ("os_bridge", "verify_after_actions"), "label": "Verify After Actions", "type": "bool", "default": _default("os_bridge", "verify_after_actions")},
+            {"path": ("os_bridge", "verification_delay"), "label": "Verification Delay", "type": "float", "default": _default("os_bridge", "verification_delay"), "min": 0.0, "max": 10.0, "step": 0.05},
         ],
     },
     "Plugins": {

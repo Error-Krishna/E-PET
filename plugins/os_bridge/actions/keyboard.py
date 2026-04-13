@@ -1,4 +1,5 @@
 import logging
+import platform
 import time
 
 logger = logging.getLogger(__name__)
@@ -53,3 +54,22 @@ def hotkey(*keys) -> None:
     _pause(0.03)
     pag.hotkey(*cleaned, interval=0.03)
     _pause(0.03)
+
+
+def save_file(filename: str) -> None:
+    pag = _require_pyautogui()
+    value = str(filename).strip()
+    if not value:
+        raise ValueError("save_file requires a non-empty filename")
+
+    system = platform.system().lower()
+    logger.info("[OS] saving file as %s", value)
+    if system == "darwin":
+        hotkey("command", "s")
+    else:
+        hotkey("ctrl", "s")
+    _pause(0.4)
+    pag.write(value, interval=0.01)
+    _pause(0.15)
+    pag.press("enter")
+    _pause(0.1)

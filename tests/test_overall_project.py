@@ -123,6 +123,8 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
         self.assertEqual(DEFAULT_CONFIG["os_bridge"]["max_retries"], 2)
         self.assertFalse(DEFAULT_CONFIG["os_bridge"]["continue_on_failure"])
+        self.assertFalse(DEFAULT_CONFIG["os_bridge"]["verify_after_actions"])
+        self.assertEqual(DEFAULT_CONFIG["os_bridge"]["verification_delay"], 0.75)
 
     def test_config_validation_normalizes_and_clamps(self):
         config = normalize_and_validate_config(
@@ -481,6 +483,39 @@ class TestOSBridge(BaseOverallTest):
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["current_step"], 2)
 
+    def test_os_bridge_executor_supports_save_file_open_url_and_screen_reading(self):
+        cfg = json.loads(json.dumps(self.config))
+        cfg["os_bridge"]["verify_after_actions"] = True
+        cfg["os_bridge"]["verification_delay"] = 0
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, cfg)
+        executor.delay_between_actions = 0
+        statuses = []
+        calls = []
+        self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+
+        with mock.patch.object(os_bridge_executor_module, "open_url", side_effect=lambda url: calls.append(("open_url", url))), \
+             mock.patch.object(os_bridge_executor_module, "save_file", side_effect=lambda filename: calls.append(("save_file", filename))), \
+             mock.patch.object(os_bridge_executor_module, "read_screen", return_value={"text": "save dialog ready"}):
+            executor._execute_task(
+                {
+                    "task_id": "task_new",
+                    "actions": [
+                        {"step": 1, "type": "open_url", "url": "https://example.com"},
+                        {"step": 2, "type": "save_file", "filename": "test.txt"},
+                        {"step": 3, "type": "read_screen"},
+                    ],
+                }
+            )
+
+        self.wait(0.2)
+        self.assertEqual(calls, [("open_url", "https://example.com"), ("save_file", "test.txt")])
+        self.assertTrue(any(item["step"] == 1 and item["status"] == "completed" for item in statuses))
+        self.assertTrue(any(item["step"] == 2 and item["status"] == "completed" for item in statuses))
+        self.assertTrue(any(item["step"] == 3 and item["status"] == "completed" for item in statuses))
+        state = executor.get_task_state("task_new")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["result"], {"text": "save dialog ready"})
+
     def test_os_bridge_executor_retries_open_app_fallbacks_before_failing(self):
         executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
         executor.delay_between_actions = 0
@@ -587,6 +622,19 @@ class TestOSBridge(BaseOverallTest):
         fake_pag.press.assert_called_once_with("enter")
         fake_pag.hotkey.assert_called_once_with("ctrl", "s", interval=0.03)
 
+    def test_os_bridge_keyboard_helpers_support_save_file(self):
+        fake_pag = mock.Mock()
+        original = os_bridge_keyboard_module._pyautogui
+        try:
+            os_bridge_keyboard_module._pyautogui = fake_pag
+            with mock.patch.object(os_bridge_keyboard_module.platform, "system", return_value="darwin"):
+                os_bridge_keyboard_module.save_file("test.txt")
+        finally:
+            os_bridge_keyboard_module._pyautogui = original
+        fake_pag.hotkey.assert_called_once_with("command", "s", interval=0.03)
+        fake_pag.write.assert_called_once()
+        fake_pag.press.assert_called_once_with("enter")
+
     def test_os_bridge_open_app_uses_platform_specific_command(self):
         with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="darwin"), \
              mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen:
@@ -613,6 +661,11 @@ class TestOSBridge(BaseOverallTest):
              mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen_linux:
             os_bridge_apps_module.open_app("gedit")
         self.assertEqual(popen_linux.call_args.args[0], ["gedit"])
+
+    def test_os_bridge_open_url_uses_browser(self):
+        with mock.patch.object(os_bridge_apps_module.webbrowser, "open_new_tab", return_value=True) as open_tab:
+            os_bridge_apps_module.open_url("https://example.com")
+        open_tab.assert_called_once_with("https://example.com")
 
 
 class TestEmotionIdleSoundAndRenderer(BaseOverallTest):

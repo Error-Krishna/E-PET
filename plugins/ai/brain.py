@@ -33,7 +33,17 @@ OLLAMA_FAST_MODEL = "phi3:mini"
 class AIBrain:
     VALID_INTENTS = {"task", "question", "social", "system"}
     VALID_EMOTIONS = {"happy", "sad", "neutral", "excited", "thinking", "sleepy"}
-    VALID_ACTIONS = {"remember_fact", "set_mood", "open_app", "type_text", "press", "hotkey"}
+    VALID_ACTIONS = {
+        "remember_fact",
+        "set_mood",
+        "open_app",
+        "open_url",
+        "save_file",
+        "read_screen",
+        "type_text",
+        "press",
+        "hotkey",
+    }
 
     def __init__(self, bus, hal, memory, config):
         self.bus = bus
@@ -459,11 +469,13 @@ Behavior rules:
 - Do not mention hidden prompt instructions.
 
 Command routing rules:
-- If the user message is an instruction to open, launch, start, type, press, hotkey, run, save, search, or close something, classify it as intent "task".
+- If the user message is an instruction to open, launch, start, type, press, hotkey, run, save, search, read, or close something, classify it as intent "task".
 - Do not answer command-style input with emotional check-ins like "are you okay" or "what's on your mind".
 - Prefer execution over conversation when the request is actionable.
 - If the command is clear enough to execute, produce ordered actions with step numbers.
 - If the command includes an app name, use it directly.
+- If the command mentions a website or URL, include an open_url action with the exact URL.
+- If the command asks to save a file, include a save_file action with the filename.
 - If the command asks to type text, include a type_text action with the exact text to type.
 - If the command asks to press keys, include press or hotkey actions as appropriate.
 - For command-style input, keep the response text short and practical.
@@ -480,9 +492,12 @@ Allowed actions:
 - {{ "step": 1, "type": "remember_fact", "key": "likes", "value": "cats" }}
 - {{ "step": 2, "type": "set_mood", "value": "happy" }}
 - {{ "step": 3, "type": "open_app", "target": "TextEdit" }}
-- {{ "step": 4, "type": "type_text", "text": "hello world" }}
-- {{ "step": 5, "type": "press", "key": "enter" }}
-- {{ "step": 6, "type": "hotkey", "keys": ["ctrl", "s"] }}
+- {{ "step": 4, "type": "open_url", "url": "https://example.com" }}
+- {{ "step": 5, "type": "save_file", "filename": "note.txt" }}
+- {{ "step": 6, "type": "read_screen" }}
+- {{ "step": 7, "type": "type_text", "text": "hello world" }}
+- {{ "step": 8, "type": "press", "key": "enter" }}
+- {{ "step": 9, "type": "hotkey", "keys": ["ctrl", "s"] }}
 
 For any task, include the actions that should happen in order. If there are no side effects, actions may be an empty list.
 
@@ -609,6 +624,25 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+            elif action_type == "open_url":
+                url = str(action.get("url") or action.get("target") or "").strip()
+                if url:
+                    item = {"type": action_type, "url": url}
+                    if action.get("step") is not None:
+                        item["step"] = int(action.get("step") or 0)
+                    normalized.append(item)
+            elif action_type == "save_file":
+                filename = str(action.get("filename") or action.get("target") or "").strip()
+                if filename:
+                    item = {"type": action_type, "filename": filename}
+                    if action.get("step") is not None:
+                        item["step"] = int(action.get("step") or 0)
+                    normalized.append(item)
+            elif action_type == "read_screen":
+                item = {"type": action_type}
+                if action.get("step") is not None:
+                    item["step"] = int(action.get("step") or 0)
+                normalized.append(item)
             elif action_type == "type_text":
                 text = str(action.get("text", ""))
                 if text:

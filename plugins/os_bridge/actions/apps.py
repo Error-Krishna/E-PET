@@ -2,6 +2,7 @@ import logging
 import platform
 import shutil
 import subprocess
+import time
 import webbrowser
 
 logger = logging.getLogger(__name__)
@@ -138,3 +139,23 @@ def open_app(name: str) -> None:
     if last_error is not None:
         raise RuntimeError(f"failed to launch app '{app_name}': {last_error}") from last_error
     raise RuntimeError(f"failed to launch app '{app_name}'")
+
+
+def open_url(url: str) -> None:
+    target = str(url).strip()
+    if not target:
+        raise ValueError("open_url requires a non-empty url")
+
+    logger.info("[OS] executing open_url %s", target)
+    if webbrowser.open_new_tab(target):
+        return
+
+    try:
+        open_app("chrome")
+        time.sleep(0.5)
+        if webbrowser.open_new_tab(target):
+            return
+    except Exception as exc:
+        logger.debug("Fallback chrome launch failed for url %s: %s", target, exc)
+
+    raise RuntimeError(f"failed to open url '{target}'")
