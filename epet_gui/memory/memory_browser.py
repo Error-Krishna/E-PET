@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from datetime import datetime
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QStandardItem, QStandardItemModel
@@ -23,28 +24,38 @@ from PySide6.QtWidgets import (
 
 
 class MemoryQueryWorker(QObject):
-    result = Signal(str, object)
+    result = Signal(str, int, object)
     finished = Signal()
 
-    def __init__(self, db_path: Path, mode: str, payload: dict | None = None):
+    def __init__(self, db_path: Path, mode: str, job_id: int, payload: dict | None = None):
         super().__init__()
         self.db_path = Path(db_path)
         self.mode = mode
+        self.job_id = job_id
         self.payload = payload or {}
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     @Slot()
     def run(self):
+        conn = None
         try:
+            if self._cancelled:
+                return
             if not self.db_path.exists():
-                self.result.emit(self.mode, {"error": "Memory database not found - run E-Pet first"})
+                self.result.emit(self.mode, self.job_id, {"error": "Memory database not found - run E-Pet first"})
                 return
             conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             if self.mode == "facts":
+                if self._cancelled:
+                    return
                 cur.execute("SELECT key, value FROM kv ORDER BY key")
                 rows = [(r["key"], r["value"], "") for r in cur.fetchall()]
-                self.result.emit(self.mode, rows)
+                self.result.emit(self.mode, self.job_id, rows)
             elif self.mode == "history":
                 limit = int(self.payload.get("limit", 50))
                 cur.execute("SELECT value FROM memories WHERE category='conversation' AND key='history'")
@@ -55,7 +66,7 @@ class MemoryQueryWorker(QObject):
                         history = json.loads(row["value"])
                     except Exception:
                         history = []
-                self.result.emit(self.mode, history[-limit:])
+                self.result.emit(self.mode, self.job_id, history[-limit:])
             elif self.mode == "stats":
                 stats = {}
                 cur.execute("SELECT COUNT(*) FROM memories WHERE category='facts'")
@@ -70,7 +81,7 @@ class MemoryQueryWorker(QObject):
                 cur.execute("SELECT value FROM memories WHERE category='personality' AND key='bond_level'")
                 row = cur.fetchone()
                 stats["bond_level"] = row[0] if row and row[0] else "0.00"
-                self.result.emit(self.mode, stats)
+                self.result.emit(self.mode, self.job_id, stats)
             elif self.mode == "events":
                 prefix = str(self.payload.get("prefix", "")).strip()
                 if prefix:
@@ -78,12 +89,13 @@ class MemoryQueryWorker(QObject):
                 else:
                     cur.execute("SELECT id, event_type, data, timestamp FROM events ORDER BY id DESC LIMIT 200")
                 rows = [(r["id"], r["event_type"], r["data"], r["timestamp"]) for r in cur.fetchall()]
-                self.result.emit(self.mode, rows)
+                self.result.emit(self.mode, self.job_id, rows)
         except Exception as exc:
-            self.result.emit(self.mode, {"error": str(exc)})
+            self.result.emit(self.mode, self.job_id, {"error": str(exc)})
         finally:
             try:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             except Exception:
                 pass
             self.finished.emit()
@@ -95,7 +107,8 @@ class MemoryBrowser(QWidget):
         self.db_path = Path(db_path)
         self._last_refreshed = 0.0
         self._history_limit = 50
-        self._active_jobs: list[tuple[QThread, MemoryQueryWorker]] = []
+        self._active_jobs: dict[str, tuple[int, QThread, MemoryQueryWorker]] = {}
+        self._query_seq = 0
 
         self._fact_model = QStandardItemModel(0, 3)
         self._fact_model.setHorizontalHeaderLabels(["Key", "Value", "Updated At"])
@@ -225,28 +238,37 @@ class MemoryBrowser(QWidget):
             self._facts_table.setRowHidden(row, not match)
 
     def _query(self, mode: str, payload: dict | None = None):
+        self._query_seq += 1
+        job_id = self._query_seq
+        if mode in self._active_jobs:
+            _, old_thread, old_worker = self._active_jobs[mode]
+            old_worker.cancel()
+            old_thread.requestInterruption()
         thread = QThread(self)
-        worker = MemoryQueryWorker(self.db_path, mode, payload)
+        worker = MemoryQueryWorker(self.db_path, mode, job_id, payload)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.result.connect(self._handle_result, Qt.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        self._active_jobs.append((thread, worker))
+        self._active_jobs[mode] = (job_id, thread, worker)
 
         def _drop_job():
             # Signal delivery lands back on the GUI thread, so this cleanup does
             # not need an explicit lock even with several overlapping queries.
-            self._active_jobs[:] = [
-                job for job in self._active_jobs if job[0] is not thread and job[1] is not worker
-            ]
+            current = self._active_jobs.get(mode)
+            if current and current[0] == job_id:
+                self._active_jobs.pop(mode, None)
 
         thread.finished.connect(_drop_job)
         thread.start()
 
-    @Slot(str, object)
-    def _handle_result(self, mode: str, data):
+    @Slot(str, int, object)
+    def _handle_result(self, mode: str, job_id: int, data):
+        current = self._active_jobs.get(mode)
+        if current and current[0] != job_id:
+            return
         if isinstance(data, dict) and data.get("error"):
             self._last_refreshed_label.setText(data["error"])
             return
@@ -274,7 +296,10 @@ class MemoryBrowser(QWidget):
             text = msg.get("text", "")
             ts = msg.get("timestamp", 0)
             item = QListWidgetItem(f"{role}: {text}")
-            item.setToolTip(str(ts))
+            try:
+                item.setToolTip(datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                item.setToolTip(str(ts))
             item.setTextAlignment(Qt.AlignRight if role == "user" else Qt.AlignLeft)
             self._history_list.addItem(item)
 

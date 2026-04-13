@@ -42,6 +42,8 @@ def start(bus, hal, memory, config):
         logger.info("AI backend selected: %s", selected_backend)
 
     def _ai_worker():
+        # The worker keeps a live reference to `brain` on purpose so the
+        # background thread cannot outlive the model/controller object.
         while True:
             payload = bus._ai_queue.get()
             if payload is None:

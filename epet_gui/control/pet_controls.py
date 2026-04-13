@@ -37,6 +37,7 @@ class PetControls(QWidget):
         self._buffer = []
         self._pending_plugin_enabled: set[str] | None = None
         self._stop_requested = False
+        self._restart_pending = False
 
         self._status = QLabel("Stopped")
         self._pid = QLabel("-")
@@ -129,13 +130,20 @@ class PetControls(QWidget):
         self._stop_requested = True
         self.send_command({"command": "quit", "args": {"source": "gui"}})
         if self._process.state() != QProcess.NotRunning:
-            self._process.terminate()
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
             if not self._process.waitForFinished(1500):
                 self._process.kill()
 
     def restart_pet(self):
+        self._restart_pending = True
+        if self._process.state() == QProcess.NotRunning:
+            self._restart_pending = False
+            self.start_pet()
+            return
         self.stop_pet()
-        QTimer.singleShot(400, self.start_pet)
 
     def kill_pet(self):
         self._stop_requested = True
@@ -214,7 +222,11 @@ class PetControls(QWidget):
         self._pid.setText(str(self._process.processId()))
 
     def _on_finished(self, exit_code, exit_status):
-        if self._stop_requested:
+        if self._restart_pending:
+            self._restart_pending = False
+            self._stop_requested = False
+            QTimer.singleShot(0, self.start_pet)
+        elif self._stop_requested:
             self._status.setText("Stopped")
             self._stop_requested = False
             self._pid.setText("-")
@@ -224,6 +236,8 @@ class PetControls(QWidget):
         self._pid.setText("-")
         if exit_code != 0:
             tail = "\n".join(self._buffer[-20:])
+            if not tail:
+                tail = "No output captured."
             QMessageBox.warning(self, "E-Pet Stopped", f"The pet exited unexpectedly.\n\nLast output:\n{tail}")
 
     def _refresh_runtime(self):

@@ -3,10 +3,13 @@ import importlib.util
 import logging
 import sys
 import types
+import threading
 from pathlib import Path
 from typing import List, Any
 
 logger = logging.getLogger(__name__)
+
+_PLUGINS_PACKAGE_LOCK = threading.Lock()
 
 class PluginLoader:
     """Loads plugins from the plugins directory based on config."""
@@ -21,18 +24,19 @@ class PluginLoader:
     def _ensure_plugins_package(self) -> None:
         """Expose the plugins directory as an importable package for relative imports."""
         package_name = "plugins"
-        package = sys.modules.get(package_name)
+        with _PLUGINS_PACKAGE_LOCK:
+            package = sys.modules.get(package_name)
 
-        if package is None:
-            package = types.ModuleType(package_name)
-            package.__path__ = [self.plugins_dir]
-            sys.modules[package_name] = package
-            return
+            if package is None:
+                package = types.ModuleType(package_name)
+                package.__path__ = [self.plugins_dir]
+                sys.modules[package_name] = package
+                return
 
-        package_paths = list(getattr(package, "__path__", []))
-        if self.plugins_dir not in package_paths:
-            package_paths.append(self.plugins_dir)
-            package.__path__ = package_paths
+            package_paths = list(getattr(package, "__path__", []))
+            if self.plugins_dir not in package_paths:
+                package_paths.append(self.plugins_dir)
+                package.__path__ = package_paths
 
     def load_plugins(self) -> None:
         """Scan the plugins directory and load enabled plugins."""

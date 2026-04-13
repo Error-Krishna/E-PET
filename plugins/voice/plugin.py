@@ -16,7 +16,7 @@ def start(bus, hal, memory, config):
         return
 
     if not hasattr(bus, "_mic_lock"):
-        bus._mic_lock = threading.Lock()
+        bus._mic_lock = threading.RLock()
     if not hasattr(bus, "_voice_followup_active"):
         bus._voice_followup_active = False
 

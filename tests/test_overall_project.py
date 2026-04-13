@@ -109,10 +109,11 @@ class BaseOverallTest(unittest.TestCase):
 
 class TestConfigAndPlatform(BaseOverallTest):
     def test_default_config_values_exist(self):
-        self.assertEqual(DEFAULT_CONFIG["personality"]["name"], "krishna")
+        self.assertEqual(DEFAULT_CONFIG["personality"]["name"], "")
         self.assertEqual(DEFAULT_CONFIG["personality"]["pet_name"], "Mochi")
         self.assertEqual(DEFAULT_CONFIG["ai"]["mode"], "auto")
         self.assertEqual(DEFAULT_CONFIG["ai"]["groq_model"], "llama-3.1-8b-instant")
+        self.assertEqual(DEFAULT_CONFIG["ai"]["groq_max_tokens"], 256)
         self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_host"], "http://localhost:11434")
         self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_model"], "phi3:mini")
         self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_keep_alive"], "10m")
@@ -217,13 +218,17 @@ class TestEventBusAndMemory(BaseOverallTest):
         self.wait()
 
     def test_topic_routing_uses_slow_pool_for_voice_and_ai(self):
+        self.bus.subscribe("pet/voice/transcript", lambda topic, data: None)
+        self.bus.subscribe("pet/ai/response", lambda topic, data: None)
         self.bus.subscribe("pet/voice/tts_state", lambda topic, data: None)
         with mock.patch.object(self.bus._slow_pool, "submit", wraps=self.bus._slow_pool.submit) as slow_submit, \
              mock.patch.object(self.bus._fast_pool, "submit", wraps=self.bus._fast_pool.submit) as fast_submit:
+            self.bus.publish("pet/voice/transcript", {"text": "hello"})
+            self.bus.publish("pet/ai/response", {"text": "ok"})
             self.bus.publish("pet/voice/tts_state", {"state": "idle"})
             self.wait()
         self.assertTrue(slow_submit.called)
-        self.assertFalse(fast_submit.called)
+        self.assertTrue(fast_submit.called)
 
     def test_topic_routing_uses_fast_pool_for_other_events(self):
         self.bus.subscribe("pet/input/touch", lambda topic, data: None)
@@ -530,7 +535,8 @@ class TestOSBridge(BaseOverallTest):
             if name != "__default_browser__":
                 raise FileNotFoundError(f"app not found: {name}")
 
-        with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=fake_open_app):
+        with mock.patch.object(os_bridge_executor_module, "resolve_open_app_candidates", return_value=["chrome", "google chrome", "__default_browser__"]), \
+             mock.patch.object(os_bridge_executor_module, "open_app", side_effect=fake_open_app):
             executor._execute_task(
                 {
                     "task_id": "task_retry",
@@ -616,11 +622,13 @@ class TestOSBridge(BaseOverallTest):
             os_bridge_keyboard_module.type_text("hello")
             os_bridge_keyboard_module.press("enter")
             os_bridge_keyboard_module.hotkey("ctrl", "s")
+            os_bridge_keyboard_module.hotkey("ctrl+w")
         finally:
             os_bridge_keyboard_module._pyautogui = original
         fake_pag.write.assert_called_once()
         fake_pag.press.assert_called_once_with("enter")
-        fake_pag.hotkey.assert_called_once_with("ctrl", "s", interval=0.03)
+        self.assertIn(mock.call("ctrl", "s", interval=0.03), fake_pag.hotkey.call_args_list)
+        self.assertIn(mock.call("ctrl", "w", interval=0.03), fake_pag.hotkey.call_args_list)
 
     def test_os_bridge_keyboard_helpers_support_save_file(self):
         fake_pag = mock.Mock()
@@ -657,7 +665,6 @@ class TestOSBridge(BaseOverallTest):
         self.assertTrue(popen.call_args.kwargs["shell"])
 
         with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="linux"), \
-             mock.patch.object(os_bridge_apps_module.shutil, "which", return_value="/usr/bin/gedit"), \
              mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen_linux:
             os_bridge_apps_module.open_app("gedit")
         self.assertEqual(popen_linux.call_args.args[0], ["gedit"])
@@ -980,7 +987,7 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.assertEqual(captured["url"], brain_module.GROQ_CHAT_COMPLETIONS_URL)
         payload = captured["kwargs"]["json"]
         self.assertEqual(payload["model"], self.config["ai"]["groq_model"])
-        self.assertEqual(payload["max_tokens"], 120)
+        self.assertEqual(payload["max_tokens"], 256)
         self.assertFalse(payload["stream"])
         self.assertIn("temperature", payload)
         self.assertEqual(captured["kwargs"]["headers"]["Authorization"], "Bearer test-groq-key")
@@ -1124,6 +1131,7 @@ class TestAIAndVoiceStack(BaseOverallTest):
 
     def test_ai_brain_validates_actions_and_normalizes_fields(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        self.memory_manager.user_name = ""
         responses = []
         actions = []
         self.bus.subscribe("pet/ai/response", lambda topic, data: responses.append(data))

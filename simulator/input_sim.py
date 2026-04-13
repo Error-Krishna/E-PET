@@ -3,6 +3,7 @@ import threading
 import sys
 import time
 import os
+import atexit
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,13 @@ class InputSimulator:
             logger.warning(f"Terminal raw mode unavailable: {e}")
             return self._idle_loop()
 
+        def _restore_terminal():
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+
+        atexit.register(_restore_terminal)
         try:
             tty.setraw(fd)
             while self._running:
@@ -92,7 +100,7 @@ class InputSimulator:
                     continue
                 self._handle_key(ch)
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            _restore_terminal()
 
     def _idle_loop(self):
         while self._running:
@@ -158,4 +166,6 @@ class InputSimulator:
                 self._text_command_buffer.pop()
             return
         if ch.isprintable():
+            # Space is printable, so raw-mode text command entry keeps literal
+            # spaces instead of treating them like wake-word shortcuts.
             self._text_command_buffer.append(ch)

@@ -34,7 +34,7 @@ class EventBus:
         self._ordered_workers: Dict[str, threading.Thread] = {}
         if self._ordered:
             for domain in self.DOMAIN_MAP:
-                domain_queue = queue.Queue()
+                domain_queue = queue.Queue(maxsize=8)
                 self._ordered_queues[domain] = domain_queue
                 worker = threading.Thread(
                     target=self._ordered_worker,
@@ -78,12 +78,20 @@ class EventBus:
                 logger.debug(f"No subscribers for topic {topic}")
                 return
             domain = self._resolve_domain(topic)
-            self._ordered_queues[domain].put(
-                {
-                    "event": event,
-                    "callbacks": matching_callbacks,
-                }
-            )
+            packet = {"event": event, "callbacks": matching_callbacks}
+            domain_queue = self._ordered_queues[domain]
+            try:
+                domain_queue.put_nowait(packet)
+            except queue.Full:
+                try:
+                    dropped = domain_queue.get_nowait()
+                    logger.warning("[BUS] ordered queue for %s full; dropping oldest event", domain)
+                except queue.Empty:
+                    dropped = None
+                try:
+                    domain_queue.put_nowait(packet)
+                except queue.Full:
+                    logger.warning("[BUS] ordered queue for %s still full; dropping new event", domain)
             return
 
         if not matching_patterns:
@@ -94,8 +102,15 @@ class EventBus:
             with self._lock:
                 callbacks = self._subscribers[pattern][:]
             for callback in callbacks:
-                pool = self._slow_pool if topic.startswith("pet/ai/") or topic.startswith("pet/voice/") else self._fast_pool
-                pool.submit(self._run_callback, callback, topic, data)
+                slow_topics = (
+                    "pet/ai/response",
+                    "pet/voice/transcript",
+                )
+                pool = self._slow_pool if topic in slow_topics else self._fast_pool
+                try:
+                    pool.submit(self._run_callback, callback, topic, data)
+                except RuntimeError:
+                    logger.debug("[BUS] dropping callback for %s during shutdown", topic)
 
     def _build_ordered_event(self, topic: str, data: Any) -> Dict[str, Any]:
         with self._seq_lock:

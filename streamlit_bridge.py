@@ -16,10 +16,14 @@ from core.hal import HALSimulator
 from core.memory import Memory
 from core.platform_utils import get_config_path, get_database_path
 from core.plugin_loader import PluginLoader
+from core.utils import unwrap_event_payload
 from simulator.face_renderer import SimpleRenderer as FaceRenderer
 from simulator.input_sim import InputSimulator
 
 logger = logging.getLogger(__name__)
+
+_ACTIVE_BACKEND: "StreamlitBackend | None" = None
+_ACTIVE_BACKEND_LOCK = threading.Lock()
 
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -42,7 +46,6 @@ class StreamlitBackend:
         self._startup_error: Exception | None = None
         self._cleanup_done = False
         self._event_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=256)
-        self._event_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
         self.bus: EventBus | None = None
@@ -65,6 +68,14 @@ class StreamlitBackend:
         self._last_ai_backend_reason: str | None = None
 
     def start(self):
+        global _ACTIVE_BACKEND
+        with _ACTIVE_BACKEND_LOCK:
+            if _ACTIVE_BACKEND is not None and _ACTIVE_BACKEND is not self:
+                try:
+                    _ACTIVE_BACKEND.stop()
+                except Exception:
+                    pass
+            _ACTIVE_BACKEND = self
         if not self._started:
             self._thread.start()
             self._started = True
@@ -75,18 +86,23 @@ class StreamlitBackend:
         return self
 
     def stop(self):
+        global _ACTIVE_BACKEND
         self.stop_event.set()
         if self._started and self._thread.is_alive():
             self._thread.join(timeout=2)
         self._cleanup()
+        with _ACTIVE_BACKEND_LOCK:
+            if _ACTIVE_BACKEND is self:
+                _ACTIVE_BACKEND = None
 
     def publish(self, topic: str, data: Any):
         if self.bus is not None:
             self.bus.publish(topic, data)
 
-    def drain_events(self) -> list[dict[str, Any]]:
+    def drain_events(self, max_events: int = 30) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        while True:
+        max_events = max(1, int(max_events))
+        while len(events) < max_events:
             try:
                 events.append(self._event_queue.get_nowait())
             except queue.Empty:
@@ -160,6 +176,7 @@ class StreamlitBackend:
             self.bus.subscribe(topic, self._capture_event)
 
     def _capture_event(self, topic: str, data: Any):
+        data = unwrap_event_payload(data)
         event = {
             "topic": topic,
             "data": data,
@@ -184,13 +201,15 @@ class StreamlitBackend:
         elif topic == "pet/system/tick" and isinstance(data, dict):
             event["tick_count"] = data.get("tick_count")
 
-        with self._event_lock:
-            if self._event_queue.full():
-                try:
-                    self._event_queue.get_nowait()
-                except queue.Empty:
-                    pass
+        if self._event_queue.full():
+            try:
+                self._event_queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
             self._event_queue.put_nowait(event)
+        except queue.Full:
+            pass
 
     def _cleanup(self):
         if self._cleanup_done:

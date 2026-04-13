@@ -39,36 +39,47 @@ def _require_ocr() -> None:
     if not PIL_AVAILABLE:
         raise RuntimeError(f"Pillow is not available: {_pil_error}")
     if not TESSERACT_AVAILABLE:
-        raise RuntimeError(f"pytesseract is not available: {_tesseract_error}")
+        raise RuntimeError(
+            "OCR support requires the Tesseract binary. Install it with "
+            "brew install tesseract on macOS, apt install tesseract-ocr on Ubuntu, "
+            "or the official Windows installer, then restart E-Pet."
+        )
 
 
 def screenshot(region: tuple[int, int, int, int] | None = None):
     """Capture the current screen and return a PIL image."""
     if MSS_AVAILABLE and PIL_AVAILABLE:
-        with mss.mss() as sct:
-            monitor = sct.monitors[1]
-            if region is not None:
-                left, top, width, height = region
-                monitor = {
-                    "left": int(left),
-                    "top": int(top),
-                    "width": int(width),
-                    "height": int(height),
-                }
-            grabbed = sct.grab(monitor)
-            return Image.frombytes("RGB", grabbed.size, grabbed.rgb)
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]
+                if region is not None:
+                    left, top, width, height = region
+                    monitor = {
+                        "left": int(left),
+                        "top": int(top),
+                        "width": int(width),
+                        "height": int(height),
+                    }
+                grabbed = sct.grab(monitor)
+                return Image.frombytes("RGB", grabbed.size, grabbed.rgb)
+        except Exception as exc:
+            logger.debug("mss screenshot failed, trying ImageGrab fallback: %s", exc)
 
     if PIL_AVAILABLE and ImageGrab is not None:
-        if region is not None:
-            left, top, width, height = region
-            bbox = (int(left), int(top), int(left + width), int(top + height))
-            return ImageGrab.grab(bbox=bbox)
-        return ImageGrab.grab()
+        try:
+            if region is not None:
+                left, top, width, height = region
+                bbox = (int(left), int(top), int(left + width), int(top + height))
+                return ImageGrab.grab(bbox=bbox)
+            return ImageGrab.grab()
+        except Exception as exc:
+            raise RuntimeError(f"ImageGrab screenshot fallback failed: {exc}") from exc
 
     raise RuntimeError(
         "No screen capture backend available: "
         f"{'mss unavailable' if not MSS_AVAILABLE else ''} "
-        f"{'Pillow unavailable' if not PIL_AVAILABLE else ''}"
+        f"{'Pillow unavailable' if not PIL_AVAILABLE else ''}. "
+        "Install mss or Pillow with ImageGrab support."
     )
 
 

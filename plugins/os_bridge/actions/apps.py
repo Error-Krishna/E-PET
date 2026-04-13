@@ -1,6 +1,5 @@
 import logging
 import platform
-import shutil
 import subprocess
 import time
 import webbrowser
@@ -121,8 +120,6 @@ def open_app(name: str) -> None:
                 return
 
             if system == "linux":
-                if shutil.which(candidate) is None and not any(sep in candidate for sep in ("/", "\\")):
-                    raise FileNotFoundError(f"app not found: {candidate}")
                 subprocess.Popen([candidate], start_new_session=True)
                 return
 
@@ -152,10 +149,11 @@ def open_url(url: str) -> None:
 
     try:
         open_app("chrome")
+    except Exception as exc:
+        logger.debug("Fallback chrome launch failed for url %s: %s", target, exc)
+    else:
         time.sleep(0.5)
         if webbrowser.open_new_tab(target):
             return
-    except Exception as exc:
-        logger.debug("Fallback chrome launch failed for url %s: %s", target, exc)
 
     raise RuntimeError(f"failed to open url '{target}'")

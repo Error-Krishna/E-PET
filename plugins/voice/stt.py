@@ -127,6 +127,8 @@ class SpeechToText:
 
     def _request_recording(self, source):
         # Wake word or follow-up trigger recording
+        # The model/backend guard keeps the whisper path disabled when audio
+        # initialization failed, so keyboard fallback remains available.
         if self.model is not None and (self.audio is not None or self.recorder is not None):
             if self.record_queue.empty():
                 self.record_queue.put_nowait(("record", source))
@@ -251,6 +253,7 @@ class SpeechToText:
                     logger.error(f"STT worker error: {e}")
                     if "Failed to read from device" in str(e):
                         logger.warning("STT: disabling mic input after device read failure")
+                        self._close_audio_resources()
                         self._running = False
                         break
 
@@ -329,5 +332,5 @@ class SpeechToText:
             stream.close()
         except Exception:
             pass
-        if self._mic_lock is not None and self._mic_lock.locked():
+        if self._mic_lock is not None:
             self._release_mic_lock()

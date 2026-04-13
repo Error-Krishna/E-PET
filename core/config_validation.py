@@ -1,4 +1,8 @@
+import logging
 from copy import deepcopy
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_CONFIG = {
@@ -19,7 +23,7 @@ DEFAULT_CONFIG = {
         "sociability": 0.5,
         # Derived by the memory manager; not a user-editable config knob.
         "bond_level": 0.0,
-        "name": "krishna",
+        "name": "",
     },
     "idle": {
         "bored_after": 120,
@@ -68,6 +72,7 @@ DEFAULT_CONFIG = {
         "mode": "auto",
         "groq_api_key": "",
         "groq_model": "llama-3.1-8b-instant",
+        "groq_max_tokens": 256,
         "ollama_host": "http://localhost:11434",
         "ollama_model": "phi3:mini",
         "ollama_keep_alive": "10m",
@@ -144,6 +149,7 @@ def normalize_and_validate_config(raw_config):
     config["ai"]["groq_api_key"] = str(config["ai"].get("groq_api_key", "")).strip()
     groq_model = str(config["ai"].get("groq_model", "llama-3.1-8b-instant")).strip()
     config["ai"]["groq_model"] = groq_model or "llama-3.1-8b-instant"
+    config["ai"]["groq_max_tokens"] = max(16, int(config["ai"].get("groq_max_tokens", 256)))
     ollama_host = str(config["ai"].get("ollama_host", "http://localhost:11434")).strip().rstrip("/")
     if not ollama_host:
         ollama_host = "http://localhost:11434"
@@ -170,5 +176,13 @@ def normalize_and_validate_config(raw_config):
     config["os_bridge"]["verify_after_actions"] = bool(verify_after_actions)
     config["os_bridge"]["verification_delay"] = max(0.0, float(config["os_bridge"].get("verification_delay", 0.75)))
     config["memory"]["db_path"] = str(config["memory"].get("db_path", "epet.db")).strip() or "epet.db"
+
+    db_path = Path(config["memory"]["db_path"]).expanduser()
+    if db_path != Path(":memory:"):
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.touch(exist_ok=True)
+        except Exception as exc:
+            logger.warning("memory.db_path is not writable (%s): %s", db_path, exc)
 
     return config

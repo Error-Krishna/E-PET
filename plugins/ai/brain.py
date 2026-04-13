@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
+import re
 
 from core.platform_utils import resolve_executable
 from core.utils import profile, unwrap_event_payload
@@ -63,6 +64,7 @@ class AIBrain:
             os.environ.get("GROQ_API_KEY") or ai_config.get("groq_api_key", "")
         ).strip()
         self.groq_model = str(ai_config.get("groq_model", "llama-3.1-8b-instant")).strip()
+        self.groq_max_tokens = max(16, int(ai_config.get("groq_max_tokens", 256)))
         self.ollama_host = self._normalize_ollama_host(ai_config.get("ollama_host", OLLAMA_DEFAULT_HOST))
         self.ollama_model = str(ai_config.get("ollama_model", OLLAMA_FAST_MODEL)).strip()
         self.ollama_generate_url = f"{self.ollama_host}{OLLAMA_GENERATE_PATH}"
@@ -76,10 +78,7 @@ class AIBrain:
         self._resolved_ollama_model = None
         self._last_backend_status: tuple[str | None, str | None] = (None, None)
         self._ollama_start_lock = threading.Lock()
-
-        # Access to memory manager through bus? We'll use direct memory for now.
-        # We'll assume memory manager is started and accessible via bus._memory_manager.
-        self.memory_manager = None
+        self._groq_available_cache: tuple[float, bool] = (0.0, False)
         self.bus.subscribe("pet/input/speech", self._on_speech)
         self.bus.subscribe("pet/ai/response", self._on_response)  # for chain? Not needed
 
@@ -113,10 +112,21 @@ class AIBrain:
         if not REQUESTS_AVAILABLE or not self.groq_api_key:
             return False
 
+        cached_at, cached_value = self._groq_available_cache
+        if time.time() - cached_at < 60:
+            return cached_value
+
         try:
-            response = requests.get(GROQ_API_BASE_URL, timeout=min(3, float(self.request_timeout)))
-            return response is not None
+            response = requests.get(
+                f"{GROQ_API_BASE_URL}/openai/v1/models",
+                headers={"Authorization": f"Bearer {self.groq_api_key}"},
+                timeout=min(3, float(self.request_timeout)),
+            )
+            available = response is not None and response.status_code == 200
+            self._groq_available_cache = (time.time(), available)
+            return available
         except Exception:
+            self._groq_available_cache = (time.time(), False)
             return False
 
     def _normalize_ollama_host(self, host: str) -> str:
@@ -215,6 +225,9 @@ class AIBrain:
                 return True
             if self._ollama_process is not None and self._ollama_process.poll() is None:
                 return True
+            if self._ollama_port_in_use():
+                logger.warning("Ollama port already in use but server is not responding; not spawning a second instance")
+                return False
 
             executable = resolve_executable("ollama")
             if not executable:
@@ -240,6 +253,19 @@ class AIBrain:
                 time.sleep(0.25)
 
             logger.warning("Ollama server did not become ready in time")
+            return False
+
+    def _ollama_port_in_use(self) -> bool:
+        from urllib.parse import urlparse
+        import socket
+
+        parsed = urlparse(self.ollama_host)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 11434
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
             return False
 
     def _ollama_inference(self, prompt):
@@ -268,7 +294,11 @@ class AIBrain:
                 timeout=self.request_timeout,
             )
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except json.JSONDecodeError:
+                logger.error("Ollama returned non-JSON response: %s", resp.text[:200])
+                raise
             content = str(data.get("response", "")).strip()
             if not content:
                 raise ValueError("Ollama response did not contain generated text")
@@ -277,7 +307,12 @@ class AIBrain:
             if getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 404:
                 fallback_model = self._resolve_ollama_model(force_refresh=True)
                 if fallback_model != payload["model"]:
-                    logger.warning("Ollama model %s unavailable; retrying with %s", payload["model"], fallback_model)
+                    logger.warning(
+                        "Ollama model %s unavailable; retrying with %s. If this persists, run `ollama pull %s`.",
+                        payload["model"],
+                        fallback_model,
+                        fallback_model,
+                    )
                     payload["model"] = fallback_model
                     try:
                         resp = requests.post(
@@ -286,12 +321,16 @@ class AIBrain:
                             timeout=self.request_timeout,
                         )
                         resp.raise_for_status()
-                        data = resp.json()
+                        try:
+                            data = resp.json()
+                        except json.JSONDecodeError:
+                            logger.error("Ollama retry returned non-JSON response: %s", resp.text[:200])
+                            raise
                         content = str(data.get("response", "")).strip()
                         if content:
                             return content
                     except Exception as retry_error:
-                        logger.error(f"Ollama retry failed: {retry_error}")
+                        logger.error("Ollama retry failed: %s. Consider running `ollama pull %s`.", retry_error, fallback_model)
             logger.error(f"Ollama LLM error: {e}")
             return self._fallback_payload()
 
@@ -553,18 +592,20 @@ Example:
         if not response:
             raise ValueError("Model returned empty response")
 
+        cleaned_response = re.sub(r"^\s*```json\s*", "", str(response), flags=re.IGNORECASE)
+        cleaned_response = re.sub(r"\s*```\s*$", "", cleaned_response)
         decoder = json.JSONDecoder()
-        start = response.find("{")
+        start = cleaned_response.find("{")
         while start != -1:
             try:
-                data, _ = decoder.raw_decode(response[start:])
+                data, _ = decoder.raw_decode(cleaned_response[start:])
                 if isinstance(data, dict):
                     return data
             except json.JSONDecodeError:
                 pass
-            start = response.find("{", start + 1)
+            start = cleaned_response.find("{", start + 1)
 
-        raise ValueError(f"Model response did not contain valid JSON: {response[:120]!r}")
+        raise ValueError(f"Model response did not contain valid JSON: {str(response)[:120]!r}")
 
     def _normalize_intent(self, intent):
         if intent in self.VALID_INTENTS:
@@ -601,6 +642,7 @@ Example:
                 continue
             action_type = action.get("type")
             if action_type not in self.VALID_ACTIONS:
+                logger.debug("Dropping action %s: unsupported type", action)
                 continue
 
             if action_type == "remember_fact":
@@ -611,6 +653,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "set_mood":
                 mood = self._normalize_emotion(action.get("value", "neutral"))
                 item = {"type": action_type, "value": mood}
@@ -624,6 +668,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "open_url":
                 url = str(action.get("url") or action.get("target") or "").strip()
                 if url:
@@ -631,6 +677,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "save_file":
                 filename = str(action.get("filename") or action.get("target") or "").strip()
                 if filename:
@@ -638,6 +686,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "read_screen":
                 item = {"type": action_type}
                 if action.get("step") is not None:
@@ -650,6 +700,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "press":
                 key = str(action.get("key") or action.get("target") or "").strip()
                 if key:
@@ -657,6 +709,8 @@ Example:
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
             elif action_type == "hotkey":
                 keys = action.get("keys")
                 if isinstance(keys, list):
@@ -666,6 +720,10 @@ Example:
                         if action.get("step") is not None:
                             item["step"] = int(action.get("step") or 0)
                         normalized.append(item)
+                    else:
+                        logger.debug("Dropping action %s: missing required field", action)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
         normalized.sort(key=lambda item: item.get("step", 10**9))
         return normalized
 
@@ -694,27 +752,47 @@ Example:
             "model": self.groq_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
-            "max_tokens": 120,
+            "max_tokens": self.groq_max_tokens,
             "stream": False,
         }
-        try:
-            headers = {"Authorization": f"Bearer {self.groq_api_key}"}
-            resp = requests.post(
-                GROQ_CHAT_COMPLETIONS_URL,
-                json=payload,
-                headers=headers,
-                timeout=self.request_timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices", [])
-            if not choices:
-                raise ValueError("Groq response did not contain any choices")
-            message = choices[0].get("message", {})
-            content = str(message.get("content", "")).strip()
-            if not content:
-                raise ValueError("Groq response did not contain message content")
-            return content
-        except Exception as e:
-            logger.error(f"Groq LLM error: {e}")
-            raise
+        headers = {"Authorization": f"Bearer {self.groq_api_key}"}
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    GROQ_CHAT_COMPLETIONS_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.request_timeout,
+                )
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("retry-after")
+                    try:
+                        wait_seconds = float(retry_after) if retry_after else 5.0
+                    except (TypeError, ValueError):
+                        wait_seconds = 5.0
+                    if attempt == 0:
+                        logger.warning("Groq rate limited; retrying in %s seconds", wait_seconds)
+                        time.sleep(wait_seconds)
+                        continue
+                resp.raise_for_status()
+                data = resp.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    raise ValueError("Groq response did not contain any choices")
+                message = choices[0].get("message", {})
+                content = str(message.get("content", "")).strip()
+                if not content:
+                    raise ValueError("Groq response did not contain message content")
+                return content
+            except Exception as e:
+                if getattr(e, "response", None) is not None and getattr(e.response, "status_code", None) == 429 and attempt == 0:
+                    retry_after = e.response.headers.get("retry-after") if getattr(e.response, "headers", None) else None
+                    try:
+                        wait_seconds = float(retry_after) if retry_after else 5.0
+                    except (TypeError, ValueError):
+                        wait_seconds = 5.0
+                    logger.warning("Groq rate limited; retrying in %s seconds", wait_seconds)
+                    time.sleep(wait_seconds)
+                    continue
+                logger.error(f"Groq LLM error: {e}")
+                raise

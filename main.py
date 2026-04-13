@@ -26,6 +26,7 @@ from epet_gui.ipc.bridge import (
     remove_file_safely,
     state_file_path,
 )
+from core.utils import unwrap_event_payload
 
 def setup_logging(level, log_file=None):
     logging.basicConfig(
@@ -78,6 +79,12 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("Boot | config loaded")
 
+    voice_tts_model = str(config.get("voice", {}).get("tts_model", "")).strip()
+    if not voice_tts_model or not Path(voice_tts_model).expanduser().exists():
+        logger.warning("Boot | voice.tts_model is missing or does not exist: %s", voice_tts_model or "<empty>")
+    if not config.get("ai", {}).get("groq_api_key", "").strip():
+        logger.warning("Boot | ai.groq_api_key is empty; Groq will stay unavailable until you provide a key")
+
     logger.info("Boot | starting event bus")
     bus = EventBus(config)
     logger.info("Boot | event bus ready (ordered=%s)", config.get("event_bus", {}).get("ordered", False))
@@ -120,19 +127,24 @@ def main():
             runtime_state.update(kwargs)
 
     def on_speech(topic, data):
+        data = unwrap_event_payload(data)
         update_runtime_state(last_speech=str((data or {}).get("text", "")), last_event="speech")
 
     def on_response(topic, data):
+        data = unwrap_event_payload(data)
         update_runtime_state(last_response=str((data or {}).get("text", "")), last_event="ai_response")
 
     def on_voice_state(topic, data):
+        data = unwrap_event_payload(data)
         state = str((data or {}).get("state", "idle"))
         update_runtime_state(voice_state=state, last_event=f"voice_{state}")
 
     def on_emotion(topic, data):
+        data = unwrap_event_payload(data)
         update_runtime_state(last_event=f"mood:{(data or {}).get('mood', 'neutral')}")
 
     def on_backend(topic, data):
+        data = unwrap_event_payload(data)
         backend = str((data or {}).get("backend", config.get("ai", {}).get("mode", "auto")))
         update_runtime_state(ai_backend=backend, last_event=f"backend:{backend}")
 
@@ -170,28 +182,28 @@ def main():
                     snapshot = dict(runtime_state)
                 plugin_names = ["emotion", "sound", "idle", "os_bridge", "voice", "ai"]
                 try:
-                    mood = memory.get("current_mood") or hal.get_state().get("face", "neutral")
-                except Exception:
-                    mood = hal.get_state().get("face", "neutral")
-                state = build_runtime_state(
-                    running=True,
-                    mood=mood,
-                    ai_mode=config.get("ai", {}).get("mode", "auto"),
-                    voice_state=snapshot.get("voice_state", "idle"),
-                    last_speech=snapshot.get("last_speech", ""),
-                    last_response=snapshot.get("last_response", ""),
-                    start_time=start_time,
-                    plugins={name: name in enabled_plugins for name in plugin_names},
-                    memory=memory,
-                    last_event=snapshot.get("last_event", ""),
-                    ai_backend=snapshot.get("ai_backend"),
-                )
-                try:
+                    try:
+                        mood = memory.get("current_mood") or hal.get_state().get("face", "neutral")
+                    except Exception:
+                        mood = hal.get_state().get("face", "neutral")
+                    state = build_runtime_state(
+                        running=True,
+                        mood=mood,
+                        ai_mode=config.get("ai", {}).get("mode", "auto"),
+                        voice_state=snapshot.get("voice_state", "idle"),
+                        last_speech=snapshot.get("last_speech", ""),
+                        last_response=snapshot.get("last_response", ""),
+                        start_time=start_time,
+                        plugins={name: name in enabled_plugins for name in plugin_names},
+                        memory=memory,
+                        last_event=snapshot.get("last_event", ""),
+                        ai_backend=snapshot.get("ai_backend"),
+                    )
                     from epet_gui.ipc.bridge import write_json_atomic
 
                     write_json_atomic(state_path, state)
                 except Exception as exc:
-                    logger.debug("IPC state write failed: %s", exc)
+                    logger.debug("IPC state update failed: %s", exc)
                 last_state_write = now
             command = read_json_file(command_path)
             if command is not None:
@@ -218,7 +230,6 @@ def main():
     input_sim = None
     if args.headless:
         logger.info("Runtime | headless mode enabled")
-        quit_requested.wait()
     else:
         try:
             from simulator.face_window import FaceWindow
@@ -252,11 +263,14 @@ def main():
         if face_window is not None:
             face_window.run()
         else:
-            quit_requested.wait()
+            while not quit_requested.is_set():
+                time.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("Runtime | keyboard interrupt received")
     finally:
         logger.info("Runtime | stopping")
+        # Stop the IPC writer before removing the state file so we do not race
+        # with a late write recreating it after shutdown begins.
         runtime_stop.set()
         try:
             remove_file_safely(state_path)
@@ -275,16 +289,19 @@ def main():
             face_renderer.stop()
         if input_sim is not None:
             input_sim.stop()
+        # Shutdown order matters: TTS should stop before STT, STT before wake,
+        # wake before idle, and idle before emotion so audio capture and mood
+        # updates wind down cleanly.
         for engine in [
-            '_emotion_engine',
-            '_sound_engine',
-            '_idle_tick',
-            '_os_bridge',
-            '_wake',
-            '_stt',
-            '_tts',
-            '_memory_manager',
-            '_brain',
+            "_tts",
+            "_stt",
+            "_wake",
+            "_idle_tick",
+            "_sound_engine",
+            "_emotion_engine",
+            "_os_bridge",
+            "_memory_manager",
+            "_brain",
         ]:
             if hasattr(bus, engine):
                 getattr(bus, engine).stop()

@@ -221,12 +221,18 @@ class FaceWindow:
         self._quit_requested.set()
 
     def _drain_event_queue(self):
+        latest_emotion = None
         while True:
             try:
                 event = self._event_queue.get_nowait()
             except queue.Empty:
                 break
+            if event.get("topic") == "pet/emotion/changed":
+                latest_emotion = event
+                continue
             self._apply_event(event)
+        if latest_emotion is not None:
+            self._apply_event(latest_emotion)
 
     def _apply_event(self, event: dict[str, Any]):
         topic = event.get("topic")

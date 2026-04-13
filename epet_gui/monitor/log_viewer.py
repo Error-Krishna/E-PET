@@ -37,6 +37,7 @@ class LogTailWorker(QObject):
         self._fh = None
         self._position = 0
         self._inode = None
+        self._size = 0
 
     @Slot()
     def start(self):
@@ -80,6 +81,7 @@ class LogTailWorker(QObject):
         try:
             stat = self.log_path.stat()
             self._inode = getattr(stat, "st_ino", None)
+            self._size = int(getattr(stat, "st_size", 0) or 0)
             if self._fh is not None:
                 self._fh.close()
             self._fh = self.log_path.open("r", encoding="utf-8", errors="replace")
@@ -95,8 +97,12 @@ class LogTailWorker(QObject):
         try:
             stat = self.log_path.stat()
             inode = getattr(stat, "st_ino", None)
-            if self._inode is not None and self._inode != 0 and inode != self._inode:
+            size = int(getattr(stat, "st_size", 0) or 0)
+            if self._inode not in (None, 0) and inode not in (None, 0) and inode != self._inode:
                 self._open_log(initial=False)
+            elif self._inode == 0 or inode == 0:
+                if size < self._position:
+                    self._open_log(initial=False)
             if self._fh is None:
                 self._open_log(initial=False)
             if self._fh is None:
@@ -105,6 +111,7 @@ class LogTailWorker(QObject):
             for line in self._fh:
                 self.lineReceived.emit(line.rstrip("\n"))
             self._position = self._fh.tell()
+            self._size = size
         except Exception as exc:
             self.statusChanged.emit(f"Log tail error: {exc}")
 
@@ -218,7 +225,11 @@ class LogViewer(QWidget):
         self._text.setUpdatesEnabled(False)
         try:
             self._text.clear()
-            for line in self._buffer:
+            lines = list(self._buffer)
+            if len(lines) > 500:
+                self._text.append(f"Showing last 500 of {len(lines)} lines.")
+                lines = lines[-500:]
+            for line in lines:
                 if self._passes_filter(line):
                     self._insert_line(line)
         finally:

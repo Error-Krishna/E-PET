@@ -3,6 +3,8 @@ import threading
 import time
 import sys
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 class SimpleRenderer:
@@ -29,6 +31,7 @@ class SimpleRenderer:
             self._render_thread.join(timeout=1)
 
     def _on_emotion_changed(self, topic, data):
+        data = unwrap_event_payload(data)
         self.current_mood = data.get("mood", "neutral")
         # Also update HAL for tracking
         self.hal.set_face(self.current_mood)

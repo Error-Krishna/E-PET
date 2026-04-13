@@ -36,6 +36,7 @@ class TextToSpeech:
         self._thread = None
         self._current_process = None
         self._play_lock = threading.Lock()
+        self._interrupt_event = threading.Event()
         self._interrupt_on_new_speech = config.get("voice", {}).get("interrupt_on_new_speech", True)
         self.voice_model = config.get("voice", {}).get("tts_model", "en_US-lessac-medium")
         # Piper path (assume installed)
@@ -70,6 +71,7 @@ class TextToSpeech:
         if not text:
             return
         if self._interrupt_on_new_speech:
+            self._interrupt_event.set()
             self._clear_queue()
             self._stop_playback()
         emotion = data.get("emotion", "neutral")
@@ -89,9 +91,12 @@ class TextToSpeech:
             except queue.Empty:
                 pass
             self._queue.put_nowait((text, speed, listen_after))
+        finally:
+            self._interrupt_event.clear()
 
     def _on_stop(self, topic, data):
         data = unwrap_event_payload(data)
+        self._interrupt_event.set()
         self._clear_queue()
         self._stop_playback()
         setattr(self.bus, "_voice_followup_active", False)
@@ -101,6 +106,9 @@ class TextToSpeech:
         while self._running:
             try:
                 text, speed, listen_after = self._queue.get(timeout=0.1)
+                if self._interrupt_event.is_set():
+                    self._interrupt_event.clear()
+                    continue
                 self._publish_state("speaking", text)
                 if self._piper_is_available():
                     self._speak_piper(text, speed)
@@ -148,8 +156,10 @@ class TextToSpeech:
             else:
                 self._print_text(text)
         finally:
-            if os.path.exists(audio_file):
+            try:
                 os.unlink(audio_file)
+            except OSError:
+                pass
 
     def _piper_is_available(self):
         if not PIPER_AVAILABLE:
@@ -176,7 +186,11 @@ class TextToSpeech:
         with self._play_lock:
             self._current_process = subprocess.Popen(cmd)
         try:
-            self._current_process.wait()
+            while self._current_process.poll() is None:
+                if self._interrupt_event.is_set():
+                    self._current_process.terminate()
+                    break
+                time.sleep(0.1)
         finally:
             with self._play_lock:
                 self._current_process = None
@@ -193,16 +207,19 @@ class TextToSpeech:
                 process.kill()
 
     def _play_audio_file(self, audio_file):
+        tried = []
         for candidate in self._audio_player_candidates():
             player = resolve_executable(candidate[0])
             if not player:
+                tried.append(candidate[0])
                 continue
             try:
                 self._play_audio_process([player, *candidate[1:], audio_file])
                 return
             except Exception as e:
                 logger.debug(f"Audio player {candidate[0]} failed: {e}")
-        raise FileNotFoundError("No supported audio playback command was found")
+            tried.append(candidate[0])
+        raise FileNotFoundError(f"No supported audio playback command was found. Tried: {', '.join(tried) or 'none'}")
 
     @staticmethod
     def _audio_player_candidates():

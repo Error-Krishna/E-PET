@@ -1,5 +1,6 @@
 import logging
 import queue
+import subprocess
 import threading
 import time
 from typing import Any, Dict
@@ -29,7 +30,7 @@ class OSBridgeExecutor:
         self.continue_on_failure = bool(os_config.get("continue_on_failure", False))
         self.verify_after_actions = bool(os_config.get("verify_after_actions", False))
         self.verification_delay = max(0.0, float(os_config.get("verification_delay", 0.75)))
-        self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+        self._queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=8)
         self._task_states: Dict[str, Dict[str, Any]] = {}
         self._state_lock = threading.Lock()
         self._action_registry = {
@@ -67,7 +68,14 @@ class OSBridgeExecutor:
         try:
             self._queue.put_nowait(payload)
         except queue.Full:
-            logger.warning("[ERROR] OS bridge queue is full; dropping task")
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(payload)
+            except queue.Full:
+                logger.warning("[ERROR] OS bridge queue is full; dropping task")
 
     def _run(self):
         while self._running:
@@ -115,10 +123,17 @@ class OSBridgeExecutor:
 
     def _execute_task(self, payload: Dict[str, Any]):
         task_id = payload["task_id"]
-        actions = sorted(
-            payload.get("actions", []),
-            key=lambda action: int(action.get("step", 0) or 0),
-        )
+        decorated_actions = []
+        for index, action in enumerate(payload.get("actions", []), start=1):
+            if not isinstance(action, dict):
+                continue
+            raw_step = action.get("step")
+            try:
+                step_value = index if raw_step is None else int(raw_step or index)
+            except (TypeError, ValueError):
+                step_value = index
+            decorated_actions.append((step_value, index, action))
+        actions = [action for _, _, action in sorted(decorated_actions, key=lambda item: (item[0], item[1]))]
         if not actions:
             return
 
@@ -128,9 +143,12 @@ class OSBridgeExecutor:
         task_failed = False
 
         for index, action in enumerate(actions, start=1):
-            step = int(action.get("step", index) or index)
             try:
-                normalized_action = self._normalize_action(action)
+                step = int(action.get("step", index) or index)
+            except (TypeError, ValueError):
+                step = index
+            try:
+                normalized_action = self._normalize_action(action, fallback_step=step)
             except Exception as exc:
                 logger.error("[ERROR] task=%s step=%s failed: %s", task_id, step, exc)
                 self._update_task_state(task_id, "failed", step, str(exc))
@@ -154,8 +172,13 @@ class OSBridgeExecutor:
                     self._verify_action(normalized_action, action_result)
                     success = True
                     break
+                except ValueError as exc:
+                    last_error = exc
+                    break
                 except Exception as exc:
                     last_error = exc
+                    if not self._is_retryable_error(exc) or attempt > self.max_retries:
+                        break
                     if attempt <= self.max_retries:
                         logger.info("[TASK] retry step %s", step)
                         self._publish_status(
@@ -195,7 +218,7 @@ class OSBridgeExecutor:
             result=final_state.get("result"),
         )
 
-    def _normalize_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_action(self, action: Dict[str, Any], fallback_step: int = 0) -> Dict[str, Any]:
         action_type = str(action.get("type", "")).strip()
         if action_type not in self._action_registry:
             raise ValueError(f"Unsupported OS action type: {action_type}")
@@ -206,7 +229,7 @@ class OSBridgeExecutor:
         if step_value is not None:
             normalized["step"] = int(step_value or 0)
         else:
-            normalized["step"] = 0
+            normalized["step"] = int(fallback_step or 0)
         if action_type == "open_app":
             target = str(action.get("target") or action.get("name") or "").strip()
             if not target:
@@ -231,7 +254,12 @@ class OSBridgeExecutor:
         elif action_type == "hotkey":
             keys = action.get("keys")
             if isinstance(keys, (list, tuple)):
-                key_tuple = [str(key).strip() for key in keys if str(key).strip()]
+                key_tuple = []
+                for key in keys:
+                    value = str(key).strip()
+                    if not value:
+                        continue
+                    key_tuple.extend(part.strip() for part in value.replace("+", " ").split() if part.strip())
             else:
                 combo = str(action.get("target") or action.get("key") or "").strip()
                 key_tuple = [part.strip() for part in combo.replace("+", " ").split() if part.strip()]
@@ -383,8 +411,6 @@ class OSBridgeExecutor:
             else:
                 screen_result = read_screen()
         except Exception as exc:
-            if action.get("type") == "read_screen" or verification.get("expected_text") or verification.get("expected_contains"):
-                raise
             logger.warning("[OS] screen verification skipped: %s", exc)
             return None
 
@@ -396,6 +422,11 @@ class OSBridgeExecutor:
         if expected_contains and expected_contains not in screen_text:
             raise RuntimeError(f"screen text did not contain expected text: {expected_contains!r}")
         return {"text": screen_text}
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        retryable_types = (OSError, RuntimeError, subprocess.SubprocessError, subprocess.TimeoutExpired)
+        return isinstance(exc, retryable_types)
 
     def _update_task_state(self, task_id: str, status: str, current_step: int, message: str, result: Any | None = None):
         state = {

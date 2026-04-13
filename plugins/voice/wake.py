@@ -6,6 +6,8 @@ import time
 import wave
 import numpy as np
 
+from core.utils import unwrap_event_payload
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -96,6 +98,7 @@ class WakeWordDetector:
         self._read_error_count = 0
         self._mic_lock = getattr(bus, "_mic_lock", None)
         self._paused = threading.Event()
+        self._whisper_model_lock = threading.Lock()
         self._configure_detector()
 
     def _configure_detector(self):
@@ -180,7 +183,7 @@ class WakeWordDetector:
         self._running = False
         self._close_audio_resources()
         if self._thread:
-            self._thread.join(timeout=1)
+            self._thread.join(timeout=self.listen_seconds + 1)
         self._thread = None
         self.porcupine = None
         self.whisper_model = None
@@ -192,6 +195,7 @@ class WakeWordDetector:
         self._paused.clear()
 
     def _on_tts_state(self, topic, data):
+        data = unwrap_event_payload(data)
         if not self._running:
             return
         state = str((data or {}).get("state", "")).strip().lower()
@@ -297,10 +301,13 @@ class WakeWordDetector:
                 time.sleep(0.1)
 
     def _ensure_whisper_model_loaded(self):
-        if self.whisper_model is None:
-            logger.info(f"Wake: loading Whisper model '{self.wake_whisper_model}'")
-            self.whisper_model = WhisperModel(self.wake_whisper_model, device="cpu", compute_type="int8")
-            logger.info("Wake: model ready")
+        if self.whisper_model is not None:
+            return
+        with self._whisper_model_lock:
+            if self.whisper_model is None:
+                logger.info(f"Wake: loading Whisper model '{self.wake_whisper_model}'")
+                self.whisper_model = WhisperModel(self.wake_whisper_model, device="cpu", compute_type="int8")
+                logger.info("Wake: model ready")
 
     def _begin_mic_capture(self):
         if self._mic_lock is None:

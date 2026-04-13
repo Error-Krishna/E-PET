@@ -20,15 +20,22 @@ def project_root() -> Path:
     return get_project_root()
 
 
+def _ipc_base_dir(root: Path | None = None) -> Path:
+    env_root = os.environ.get("EPET_STATE_DIR", "").strip()
+    if env_root:
+        return Path(env_root).expanduser()
+    return root or project_root()
+
+
 def state_file_path(root: Path | None = None) -> Path:
     # File-based IPC only works when the GUI and backend share the same
     # filesystem. A socket transport is needed for multi-machine support.
-    return (root or project_root()) / STATE_FILENAME
+    return _ipc_base_dir(root) / STATE_FILENAME
 
 
 def command_file_path(root: Path | None = None) -> Path:
     # Same shared-filesystem requirement as state_file_path().
-    return (root or project_root()) / COMMAND_FILENAME
+    return _ipc_base_dir(root) / COMMAND_FILENAME
 
 
 def resolve_log_file_path(config: dict[str, Any] | None = None, config_path: Path | None = None) -> Path:
@@ -44,6 +51,8 @@ def resolve_log_file_path(config: dict[str, Any] | None = None, config_path: Pat
 def read_json_file(path: Path) -> Dict[str, Any] | None:
     try:
         if not path.exists():
+            return None
+        if path.stat().st_size == 0:
             return None
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)

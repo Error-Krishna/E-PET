@@ -47,7 +47,7 @@ class StatePollWorker(QObject):
     def _poll(self):
         data = read_json_file(self.state_path)
         if data is None:
-            self.statusChanged.emit("E-Pet is not running")
+            self.statusChanged.emit("IPC file not found - is the backend running?")
             return
         self.stateChanged.emit(data)
         self.statusChanged.emit("State synced")
@@ -63,6 +63,7 @@ class PetStatePanel(QWidget):
         self._state = {}
 
         self._status_badge = QLabel("Stopped")
+        self._ipc_status = QLabel("Waiting for backend")
         self._mood_value = QLabel("neutral")
         self._ai_value = QLabel("auto")
         self._voice_value = QLabel("idle")
@@ -85,6 +86,7 @@ class PetStatePanel(QWidget):
         self._poll_worker.moveToThread(self._poll_thread)
         self._poll_thread.started.connect(self._poll_worker.start)
         self._poll_worker.stateChanged.connect(self._apply_state, Qt.QueuedConnection)
+        self._poll_worker.statusChanged.connect(self._ipc_status.setText, Qt.QueuedConnection)
         self._poll_thread.start()
 
     def closeEvent(self, event):
@@ -106,6 +108,8 @@ class PetStatePanel(QWidget):
         grid.addWidget(self._voice_value, 3, 1)
         grid.addWidget(QLabel("Uptime"), 4, 0)
         grid.addWidget(self._uptime_value, 4, 1)
+        grid.addWidget(QLabel("IPC"), 5, 0)
+        grid.addWidget(self._ipc_status, 5, 1)
         return box
 
     def _build_stats(self):

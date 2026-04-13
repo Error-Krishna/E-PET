@@ -33,6 +33,10 @@ class ConversationBridge:
 
     def _on_input(self, topic, data):
         data = unwrap_event_payload(data)
+        if topic == "pet/input/speech" and isinstance(data, dict) and data.get("source") == "microphone":
+            # The matching pet/voice/transcript event already carries the
+            # microphone transcript, so drop the duplicate speech envelope.
+            return
         self._enqueue("input", data)
 
     def _on_response(self, topic, data):
