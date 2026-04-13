@@ -1,0 +1,72 @@
+hardware:
+  mode: simulator
+  debug: false
+plugins:
+  enabled:
+  - emotion
+  - sound
+  - idle
+  - os_bridge
+  - voice
+  - ai
+simulator:
+  fps: 10
+personality:
+  pet_name: mochi
+  curiosity: 0.5
+  energy: 0.6
+  sociability: 0.5
+  bond_level: 0.0
+  name: krishna
+idle:
+  bored_after: 120
+  sleepy_after: 300
+logging:
+  level: INFO
+  file: epet.log
+event_bus:
+  ordered: true
+  log_events: false
+os_bridge:
+  enabled: true
+  delay_between_actions: 0.3
+  max_retries: 2
+  retry_delay: 0.15
+  continue_on_failure: false
+voice:
+  enabled: true
+  wake_word: hi bob
+  wake_mode: whisper
+  wake_keyword: computer
+  stt_backend: auto
+  tts_backend: piper
+  porcupine_access_key: ''
+  porcupine_keyword_path: ''
+  piper_path: piper
+  tts_model: /Users/krishnagoyal/Desktop/epet/voices/en_US-lessac-medium.onnx
+  whisper_model: tiny
+  wake_whisper_model: tiny
+  record_seconds: 4
+  wake_listen_seconds: 2
+  follow_up_listen_seconds: 2
+  wake_check_interval: 0.3
+  wake_cooldown_seconds: 4.0
+  mic_lock_timeout: 5.0
+  interrupt_on_new_speech: true
+ai:
+  enabled: true
+  mode: auto
+  groq_api_key:
+  groq_model: llama-3.1-8b-instant
+  ollama_host: http://localhost:11434
+  ollama_model: phi3:mini
+  ollama_keep_alive: 10m
+  ollama_temperature: 0.7
+  ollama_num_ctx: 1024
+  ollama_num_predict: 96
+  request_timeout: 60
+memory:
+  max_history: 20
+  persist_history: true
+  extract_facts: true
+  db_path: epet.db
