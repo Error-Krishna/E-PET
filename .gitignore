@@ -36,9 +36,8 @@ Thumbs.db
 .vscode/
 
 # Config (optional if sensitive)
-# config.yaml
-config.local.yaml
-config.*.local.yaml
+
+
 
 # Pytest cache
 .pytest_cache/

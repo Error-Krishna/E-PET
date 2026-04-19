@@ -82,10 +82,6 @@ def render_face_html(mood: str) -> str:
         else:
             mouth = '<line x1="172" y1="238" x2="228" y2="238" />'
 
-    if eye == "happy":
-        extra = '<path d="M 96 132 Q 122 102 148 132" stroke="#111827" stroke-width="5" fill="none" stroke-linecap="round" />' \
-                '<path d="M 252 132 Q 278 102 304 132" stroke="#111827" stroke-width="5" fill="none" stroke-linecap="round" />'
-
     return f"""
 <div style="width:100%;min-height:360px;border-radius:28px;overflow:hidden;background:linear-gradient(160deg,#05060a,#0b1020);border:1px solid rgba(255,255,255,0.08);box-shadow:0 22px 60px rgba(0,0,0,0.38);">
   <svg viewBox="0 0 400 320" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style="display:block;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.05), transparent 45%);">
@@ -105,7 +101,8 @@ def render_face_html(mood: str) -> str:
 
 def ensure_backend() -> StreamlitBackend:
     backend = st.session_state.get("backend")
-    if backend is not None and getattr(backend, "_thread", None) is not None and backend._thread.is_alive():
+    thread = getattr(backend, "_thread", None)
+    if backend is not None and thread is not None and thread.is_alive():
         return backend
 
     config_path = get_config_path()

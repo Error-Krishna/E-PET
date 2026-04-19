@@ -103,7 +103,8 @@ def _configure_qt_paths():
     # plugin discovery on macOS.
     os.environ["QT_PLUGIN_PATH"] = str(plugin_root)
     os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(plugin_root / "platforms")
-    os.environ["QT_QPA_PLATFORM"] = "cocoa"
+    if sys.platform == "darwin":
+        os.environ["QT_QPA_PLATFORM"] = "cocoa"
     _write_qt_conf(plugin_root)
     return plugin_root
 

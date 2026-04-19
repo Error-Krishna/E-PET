@@ -87,11 +87,11 @@ class PetStatePanel(QWidget):
         self._poll_thread.started.connect(self._poll_worker.start)
         self._poll_worker.stateChanged.connect(self._apply_state, Qt.QueuedConnection)
         self._poll_worker.statusChanged.connect(self._ipc_status.setText, Qt.QueuedConnection)
+        self._poll_worker.finished.connect(self._poll_thread.quit)
         self._poll_thread.start()
 
     def closeEvent(self, event):
         self._poll_worker.stop()
-        self._poll_thread.quit()
         self._poll_thread.wait(1000)
         super().closeEvent(event)
 

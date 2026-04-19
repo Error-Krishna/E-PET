@@ -1,4 +1,5 @@
 import logging
+import os
 import platform
 import subprocess
 import time
@@ -101,11 +102,21 @@ def open_app(name: str) -> None:
 
             logger.info("[OS] executing open_app %s", candidate)
             if system == "windows":
-                process = subprocess.Popen(["start", candidate], shell=True)
-                return_code = process.wait(timeout=10)
-                if return_code not in (0, None):
-                    raise RuntimeError(f"launch failed with exit code {return_code}")
-                return
+                try:
+                    os.startfile(candidate)  # type: ignore[attr-defined]
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    process = subprocess.Popen(
+                        ["cmd", "/c", "start", "", candidate],
+                        shell=False,
+                    )
+                    try:
+                        process.wait(timeout=10)
+                        return
+                    except Exception as wait_exc:
+                        last_error = wait_exc
+                        raise
 
             if system == "darwin":
                 process = subprocess.Popen(

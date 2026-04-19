@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import sqlite3
 import time
 from pathlib import Path
 from datetime import datetime
@@ -22,6 +20,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
 )
 
+from core.memory import Memory
+
 
 class MemoryQueryWorker(QObject):
     result = Signal(str, int, object)
@@ -40,62 +40,44 @@ class MemoryQueryWorker(QObject):
 
     @Slot()
     def run(self):
-        conn = None
+        memory = None
         try:
             if self._cancelled:
                 return
-            if not self.db_path.exists():
-                self.result.emit(self.mode, self.job_id, {"error": "Memory database not found - run E-Pet first"})
-                return
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
+            memory = Memory(str(self.db_path))
             if self.mode == "facts":
                 if self._cancelled:
                     return
-                cur.execute("SELECT key, value FROM kv ORDER BY key")
-                rows = [(r["key"], r["value"], "") for r in cur.fetchall()]
+                rows = [(key, value, "") for key, value in memory.list_kv()]
                 self.result.emit(self.mode, self.job_id, rows)
             elif self.mode == "history":
                 limit = int(self.payload.get("limit", 50))
-                cur.execute("SELECT value FROM memories WHERE category='conversation' AND key='history'")
-                row = cur.fetchone()
-                history = []
-                if row and row["value"]:
-                    try:
-                        history = json.loads(row["value"])
-                    except Exception:
-                        history = []
-                self.result.emit(self.mode, self.job_id, history[-limit:])
+                history = memory.get_conversation_history(limit=limit)
+                self.result.emit(self.mode, self.job_id, history)
             elif self.mode == "stats":
-                stats = {}
-                cur.execute("SELECT COUNT(*) FROM memories WHERE category='facts'")
-                stats["facts_total"] = int(cur.fetchone()[0] or 0)
-                cur.execute("SELECT COUNT(*) FROM events")
-                stats["event_count"] = int(cur.fetchone()[0] or 0)
-                cur.execute("SELECT COUNT(*) FROM memories")
-                stats["memory_count"] = int(cur.fetchone()[0] or 0)
-                cur.execute("SELECT value FROM memories WHERE category='personality' AND key='interaction_count'")
-                row = cur.fetchone()
-                stats["interaction_count"] = int(row[0]) if row and row[0] else 0
-                cur.execute("SELECT value FROM memories WHERE category='personality' AND key='bond_level'")
-                row = cur.fetchone()
-                stats["bond_level"] = row[0] if row and row[0] else "0.00"
+                stats = memory.stats()
+                personality = memory.list_memories("personality")
+                bond_level = next((value for key, value in personality if key == "bond_level"), "0.00")
+                stats["bond_level"] = bond_level or "0.00"
                 self.result.emit(self.mode, self.job_id, stats)
             elif self.mode == "events":
                 prefix = str(self.payload.get("prefix", "")).strip()
-                if prefix:
-                    cur.execute("SELECT id, event_type, data, timestamp FROM events WHERE event_type LIKE ? ORDER BY id DESC LIMIT 200", (f"{prefix}%",))
-                else:
-                    cur.execute("SELECT id, event_type, data, timestamp FROM events ORDER BY id DESC LIMIT 200")
-                rows = [(r["id"], r["event_type"], r["data"], r["timestamp"]) for r in cur.fetchall()]
+                rows = [
+                    (
+                        event.get("id"),
+                        event.get("event_type"),
+                        event.get("data"),
+                        event.get("timestamp"),
+                    )
+                    for event in memory.get_events(prefix=prefix, limit=200)
+                ]
                 self.result.emit(self.mode, self.job_id, rows)
         except Exception as exc:
             self.result.emit(self.mode, self.job_id, {"error": str(exc)})
         finally:
             try:
-                if conn is not None:
-                    conn.close()
+                if memory is not None:
+                    memory.close()
             except Exception:
                 pass
             self.finished.emit()
@@ -190,6 +172,16 @@ class MemoryBrowser(QWidget):
     def _tab_changed(self):
         self.refresh_visible_tab()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+
+    def hideEvent(self, event):
+        if self._refresh_timer.isActive():
+            self._refresh_timer.stop()
+        super().hideEvent(event)
+
     def refresh_visible_tab(self):
         idx = self._tabs.currentIndex()
         if idx == 0:
@@ -257,6 +249,8 @@ class MemoryBrowser(QWidget):
         def _drop_job():
             # Signal delivery lands back on the GUI thread, so this cleanup does
             # not need an explicit lock even with several overlapping queries.
+            # If a newer job replaced this one, the job_id guard leaves the
+            # current entry intact.
             current = self._active_jobs.get(mode)
             if current and current[0] == job_id:
                 self._active_jobs.pop(mode, None)

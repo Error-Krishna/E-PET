@@ -5,15 +5,29 @@ import threading
 import time
 from typing import Any, Dict
 
+from urllib.parse import quote_plus
+
 from .actions.apps import open_app, open_url, resolve_open_app_candidates
 from .actions.keyboard import hotkey, press, save_file, type_text
 from .actions.screen import read_screen
+from .actions.web import google_search, open_website, youtube_search
 
 logger = logging.getLogger(__name__)
 
 
 class OSBridgeExecutor:
-    SUPPORTED_ACTIONS = {"open_app", "open_url", "type_text", "press", "hotkey", "save_file", "read_screen"}
+    SUPPORTED_ACTIONS = {
+        "open_app",
+        "open_url",
+        "open_website",
+        "google_search",
+        "youtube_search",
+        "type_text",
+        "press",
+        "hotkey",
+        "save_file",
+        "read_screen",
+    }
     DEFAULT_MAX_RETRIES = 2
 
     def __init__(self, bus, hal, memory, config):
@@ -36,6 +50,9 @@ class OSBridgeExecutor:
         self._action_registry = {
             "open_app": self._handle_open_app,
             "open_url": self._handle_open_url,
+            "open_website": self._handle_open_website,
+            "google_search": self._handle_google_search,
+            "youtube_search": self._handle_youtube_search,
             "type_text": self._handle_type_text,
             "press": self._handle_press,
             "hotkey": self._handle_hotkey,
@@ -141,6 +158,7 @@ class OSBridgeExecutor:
         logger.info("[TASK] started %s", task_id)
         self._publish_status(task_id, 0, "running", message="task started")
         task_failed = False
+        step_results: Dict[int, Any] = {}
 
         for index, action in enumerate(actions, start=1):
             try:
@@ -194,12 +212,14 @@ class OSBridgeExecutor:
             if success:
                 logger.info("[TASK] step %s completed", step)
                 self._update_task_state(task_id, "running", step, description, result=action_result)
+                step_results[step] = action_result
                 self._publish_status(task_id, step, "completed", message=description, result=action_result)
             else:
                 error_text = str(last_error) if last_error else "step failed"
                 logger.error("[ERROR] step failed task=%s step=%s: %s", task_id, step, error_text)
                 task_failed = True
                 self._update_task_state(task_id, "failed", step, error_text, result=action_result)
+                step_results[step] = {"error": error_text, "result": action_result}
                 self._publish_status(task_id, step, "failed", error_text, message=description, result=action_result)
                 if not self.continue_on_failure:
                     break
@@ -216,6 +236,15 @@ class OSBridgeExecutor:
             final_state.get("current_step", len(actions)),
             final_message,
             result=final_state.get("result"),
+        )
+        self._publish_result(
+            task_id=task_id,
+            status=final_status,
+            message=final_message,
+            actions=actions,
+            step_results=step_results,
+            current_step=final_state.get("current_step", len(actions)),
+            task_state=final_state,
         )
 
     def _normalize_action(self, action: Dict[str, Any], fallback_step: int = 0) -> Dict[str, Any]:
@@ -294,17 +323,49 @@ class OSBridgeExecutor:
         if not candidates:
             raise ValueError("open_app requires a target app name")
 
-        candidate_index = min(max(attempt - 1, 0), len(candidates) - 1)
-        candidate = candidates[candidate_index]
-        if candidate != action.get("target"):
-            logger.info("[TASK] open_app fallback -> %s", candidate)
-        open_app(candidate)
+        target = str(action.get("target") or action.get("name") or "").strip()
+        routed_url = self._route_web_target(target)
+        if routed_url:
+            logger.info("[TASK] open_app routed to web target -> %s", routed_url)
+            return open_url(routed_url)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                if candidate != target:
+                    logger.info("[TASK] open_app fallback -> %s", candidate)
+                open_app(candidate)
+                return
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"failed to launch app '{target}'")
 
     def _handle_open_url(self, action: Dict[str, Any], attempt: int = 1):
         url = str(action.get("url", "")).strip()
         if not url:
             raise ValueError("open_url requires a url")
         open_url(url)
+
+    def _handle_open_website(self, action: Dict[str, Any], attempt: int = 1):
+        name = str(action.get("name", "")).strip()
+        if not name:
+            raise ValueError("open_website requires a website name")
+        open_website(name)
+
+    def _handle_google_search(self, action: Dict[str, Any], attempt: int = 1):
+        query = str(action.get("query", "")).strip()
+        if not query:
+            raise ValueError("google_search requires a query")
+        google_search(query)
+
+    def _handle_youtube_search(self, action: Dict[str, Any], attempt: int = 1):
+        query = str(action.get("query", "")).strip()
+        if not query:
+            open_url("https://www.youtube.com")
+            return
+        youtube_search(query)
 
     def _handle_type_text(self, action: Dict[str, Any], attempt: int = 1):
         text = str(action.get("text", ""))
@@ -425,8 +486,60 @@ class OSBridgeExecutor:
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        if any(
+            marker in message
+            for marker in (
+                "unable to find application",
+                "failed to launch app",
+                "app not found",
+                "launch failed",
+            )
+        ):
+            return False
         retryable_types = (OSError, RuntimeError, subprocess.SubprocessError, subprocess.TimeoutExpired)
         return isinstance(exc, retryable_types)
+
+    @staticmethod
+    def _route_web_target(target: str) -> str | None:
+        cleaned = str(target or "").strip().lower()
+        if not cleaned:
+            return None
+
+        websites = {
+            "youtube": "https://www.youtube.com",
+            "google": "https://google.com",
+            "gmail": "https://mail.google.com",
+            "github": "https://github.com",
+            "reddit": "https://reddit.com",
+            "twitter": "https://twitter.com",
+            "x": "https://x.com",
+            "linkedin": "https://linkedin.com",
+            "netflix": "https://netflix.com",
+            "spotify": "https://open.spotify.com",
+            "amazon": "https://amazon.com",
+            "wikipedia": "https://wikipedia.org",
+            "stack overflow": "https://stackoverflow.com",
+            "chatgpt": "https://chat.openai.com",
+            "claude": "https://claude.ai",
+            "notion": "https://notion.so",
+            "figma": "https://figma.com",
+            "vercel": "https://vercel.com",
+            "heroku": "https://heroku.com",
+            "aws console": "https://console.aws.amazon.com",
+            "google cloud": "https://console.cloud.google.com",
+            "azure": "https://portal.azure.com",
+        }
+        if cleaned in websites:
+            return websites[cleaned]
+
+        if "youtube" in cleaned:
+            query = cleaned.replace("youtube", "").replace("video", "").replace("watch", "").replace("play", "").strip(" -_.,")
+            if query:
+                return f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+            return "https://www.youtube.com"
+
+        return None
 
     def _update_task_state(self, task_id: str, status: str, current_step: int, message: str, result: Any | None = None):
         state = {
@@ -476,3 +589,26 @@ class OSBridgeExecutor:
         if result is not None:
             payload["result"] = result
         self.bus.publish("pet/task/status", payload)
+
+    def _publish_result(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        message: str,
+        actions: list[dict[str, Any]],
+        step_results: Dict[int, Any],
+        current_step: int,
+        task_state: Dict[str, Any],
+    ) -> None:
+        payload = {
+            "task_id": task_id,
+            "status": status,
+            "message": message,
+            "summary": message,
+            "actions": list(actions),
+            "results": {str(step): result for step, result in step_results.items()},
+            "current_step": int(current_step or 0),
+            "task_state": dict(task_state or {}),
+        }
+        self.bus.publish("pet/os_bridge/result", payload)

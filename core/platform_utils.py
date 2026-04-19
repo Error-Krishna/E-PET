@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MEMORY_FILENAME = "epet.kv.json"
 
 
 def get_project_root() -> Path:
@@ -19,7 +20,7 @@ def get_config_path(filename: str = "config.yaml") -> Path:
     return get_project_root() / filename
 
 
-def get_database_path(filename: str = "epet.db") -> Path:
+def get_database_path(filename: str = DEFAULT_MEMORY_FILENAME) -> Path:
     """Return a database path anchored at the project root."""
     return get_project_root() / filename
 

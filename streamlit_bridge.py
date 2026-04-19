@@ -214,6 +214,8 @@ class StreamlitBackend:
     def _cleanup(self):
         if self._cleanup_done:
             return
+        # stop() and _run() both intentionally reach here; the guard makes the
+        # shutdown path idempotent so duplicate cleanup attempts are harmless.
         self._cleanup_done = True
 
         # Keep this list explicit so shutdown order stays predictable; update

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import requests
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
@@ -22,6 +21,14 @@ from PySide6.QtWidgets import (
 
 from epet_gui.ipc.bridge import resolve_log_file_path
 
+try:
+    import requests
+
+    REQUESTS_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    requests = None
+    REQUESTS_AVAILABLE = False
+
 
 class ProbeWorker(QObject):
     result = Signal(object)
@@ -36,6 +43,9 @@ class ProbeWorker(QObject):
     @Slot()
     def run(self):
         try:
+            if not REQUESTS_AVAILABLE:
+                self.result.emit({"ok": False, "text": "requests is not installed"})
+                return
             if self.kind == "groq":
                 api_key = self.payload["api_key"]
                 model = self.payload["model"]
@@ -106,6 +116,9 @@ class AIControls(QWidget):
         ollama_probe.clicked.connect(self.test_ollama)
         send_prompt = QPushButton("Send to Pet Brain")
         send_prompt.clicked.connect(self.send_prompt)
+        if not REQUESTS_AVAILABLE:
+            groq_probe.setEnabled(False)
+            ollama_probe.setEnabled(False)
 
         row = QHBoxLayout()
         row.addWidget(groq_probe)

@@ -79,8 +79,10 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("Boot | config loaded")
 
-    voice_tts_model = str(config.get("voice", {}).get("tts_model", "")).strip()
-    if not voice_tts_model or not Path(voice_tts_model).expanduser().exists():
+    voice_config = config.get("voice", {})
+    voice_tts_backend = str(voice_config.get("tts_backend", "piper")).strip().lower() or "piper"
+    voice_tts_model = str(voice_config.get("tts_model", "")).strip()
+    if voice_tts_backend == "piper" and (not voice_tts_model or not Path(voice_tts_model).expanduser().exists()):
         logger.warning("Boot | voice.tts_model is missing or does not exist: %s", voice_tts_model or "<empty>")
     if not config.get("ai", {}).get("groq_api_key", "").strip():
         logger.warning("Boot | ai.groq_api_key is empty; Groq will stay unavailable until you provide a key")
@@ -98,7 +100,7 @@ def main():
     logger.info("Boot | HAL ready")
 
     logger.info("Boot | opening memory store")
-    memory_db_raw = config.get("memory", {}).get("db_path") or "epet.db"
+    memory_db_raw = config.get("memory", {}).get("db_path") or "epet.kv.json"
     memory_db_path = Path(memory_db_raw).expanduser()
     if not memory_db_path.is_absolute():
         memory_db_path = get_project_root() / memory_db_path
@@ -166,6 +168,7 @@ def main():
     bus.subscribe("pet/input/speech", on_speech)
     bus.subscribe("pet/ai/response", on_response)
     bus.subscribe("pet/voice/tts_state", on_voice_state)
+    bus.subscribe("pet/voice/state", on_voice_state)
     bus.subscribe("pet/emotion/changed", on_emotion)
     bus.subscribe("pet/ai/backend", on_backend)
     bus.subscribe("pet/system/quit", on_quit)
@@ -297,7 +300,6 @@ def main():
             "_stt",
             "_wake",
             "_idle_tick",
-            "_sound_engine",
             "_emotion_engine",
             "_os_bridge",
             "_memory_manager",
@@ -307,6 +309,8 @@ def main():
                 getattr(bus, engine).stop()
         bus.publish("pet/sound/play", {"name": "shutdown"})
         time.sleep(0.3)
+        if hasattr(bus, "_sound_engine"):
+            getattr(bus, "_sound_engine").stop()
         bus.shutdown()
         memory.close()
         logger.info("Runtime | goodbye")

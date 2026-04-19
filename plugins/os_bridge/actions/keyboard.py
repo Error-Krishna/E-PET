@@ -1,5 +1,6 @@
 import logging
 import platform
+import subprocess
 import time
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,57 @@ def _normalize_hotkey_keys(pag, keys) -> list[str]:
 
 
 def _copy_to_clipboard(text: str) -> bool:
+    if platform.system().lower() == "darwin":
+        try:
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True, timeout=5)
+            return True
+        except Exception as exc:
+            logger.debug("pbcopy unavailable: %s", exc)
+    if platform.system().lower() == "windows":
+        try:
+            import win32clipboard  # type: ignore
+
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+            return True
+        except Exception as exc:
+            logger.debug("win32clipboard unavailable: %s", exc)
+        try:
+            import ctypes
+
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            if not user32.OpenClipboard(None):
+                raise RuntimeError("OpenClipboard failed")
+            try:
+                user32.EmptyClipboard()
+                GMEM_MOVEABLE = 0x0002
+                CF_UNICODETEXT = 13
+                data = text.encode("utf-16-le") + b"\x00\x00"
+                h_global = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                if not h_global:
+                    raise RuntimeError("GlobalAlloc failed")
+                ptr = kernel32.GlobalLock(h_global)
+                if not ptr:
+                    raise RuntimeError("GlobalLock failed")
+                try:
+                    ctypes.memmove(ptr, data, len(data))
+                finally:
+                    kernel32.GlobalUnlock(h_global)
+                if not user32.SetClipboardData(CF_UNICODETEXT, h_global):
+                    raise RuntimeError("SetClipboardData failed")
+                return True
+            finally:
+                user32.CloseClipboard()
+        except Exception as exc:
+            logger.debug("ctypes clipboard fallback unavailable: %s", exc)
+
     try:
         import tkinter as tk
 
@@ -72,17 +124,44 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
+def _clear_clipboard() -> None:
+    if platform.system().lower() == "windows":
+        try:
+            import win32clipboard  # type: ignore
+
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception:
+            pass
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.update()
+        root.destroy()
+    except Exception:
+        pass
+
+
 def type_text(text: str) -> None:
     pag = _require_pyautogui()
     value = str(text)
     logger.info("[OS] typing text")
     _pause(ACTION_PAUSE)
-    if any(ord(ch) > 127 for ch in value):
+    if any(ord(ch) > 127 for ch in value) or len(value) > 50:
         # pyautogui.write is unreliable for non-ASCII text on several platforms,
         # so paste from the clipboard instead when Unicode is present.
         if _copy_to_clipboard(value):
             paste_hotkey = ("command", "v") if platform.system().lower() == "darwin" else ("ctrl", "v")
             pag.hotkey(*paste_hotkey, interval=HOTKEY_INTERVAL)
+            time.sleep(0.1)
+            _clear_clipboard()
             _pause(ACTION_PAUSE)
             return
         logger.debug("clipboard fallback unavailable; using direct key injection")

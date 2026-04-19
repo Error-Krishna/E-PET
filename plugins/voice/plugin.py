@@ -37,5 +37,5 @@ def start(bus, hal, memory, config):
         "Voice: ready (wake=%s, stt=%s, tts=%s)",
         voice_config.get("wake_mode", "whisper"),
         voice_config.get("whisper_model", "tiny"),
-        "piper" if voice_config.get("tts_model") else "system",
+        voice_config.get("tts_backend", "piper"),
     )

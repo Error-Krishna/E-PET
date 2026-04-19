@@ -12,7 +12,8 @@ plugins:
 simulator:
   fps: 10
 personality:
-  pet_name: mochi
+  pet_name: COSMOS
+  assistant_mode: true
   curiosity: 0.5
   energy: 0.6
   sociability: 0.5
@@ -35,7 +36,9 @@ os_bridge:
   continue_on_failure: false
 voice:
   enabled: true
-  wake_word: Hi Bob
+  # wake_word is used by the Whisper wake detector.
+  wake_word: COSMOS
+  # wake_keyword is used only when Porcupine keyword detection is enabled.
   wake_mode: whisper
   wake_keyword: computer
   stt_backend: auto
@@ -43,12 +46,17 @@ voice:
   porcupine_access_key: ''
   porcupine_keyword_path: ''
   piper_path: piper
-  tts_model: /Users/krishnagoyal/Desktop/epet/voices/en_US-lessac-medium.onnx
-  whisper_model: tiny
+  tts_model: ''
+  whisper_model: base
   wake_whisper_model: tiny
-  record_seconds: 4
+  stt_language: en
+  stt_beam_size: 5
   wake_listen_seconds: 2
   follow_up_listen_seconds: 2
+  conversation_window_seconds: 8.0
+  silence_threshold_seconds: 1.4
+  min_speech_duration_seconds: 0.35
+  vad_sensitivity: 0.65
   wake_check_interval: 0.3
   wake_cooldown_seconds: 4.0
   mic_lock_timeout: 5.0
@@ -69,4 +77,4 @@ memory:
   max_history: 20
   persist_history: true
   extract_facts: true
-  db_path: epet.db
+  db_path: epet.kv.json

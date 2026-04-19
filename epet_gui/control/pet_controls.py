@@ -84,12 +84,15 @@ class PetControls(QWidget):
             plugin_layout.addWidget(check)
         plugin_layout.addStretch(1)
 
-        mood_box = QGroupBox("Mood Control")
-        mood_layout = QHBoxLayout(mood_box)
-        for mood in ["happy", "sad", "curious", "bored", "angry", "neutral"]:
-            button = QPushButton(mood)
-            button.clicked.connect(lambda _, m=mood: self.send_command({"command": "set_mood", "args": {"mood": m}}))
-            mood_layout.addWidget(button)
+        assistant_mode = bool(self.get_config().get("personality", {}).get("assistant_mode", False))
+        mood_box = None
+        if not assistant_mode:
+            mood_box = QGroupBox("Mood Control")
+            mood_layout = QHBoxLayout(mood_box)
+            for mood in ["happy", "sad", "curious", "bored", "angry", "neutral"]:
+                button = QPushButton(mood)
+                button.clicked.connect(lambda _, m=mood: self.send_command({"command": "set_mood", "args": {"mood": m}}))
+                mood_layout.addWidget(button)
 
         event_box = QGroupBox("Event Injector")
         event_layout = QVBoxLayout(event_box)
@@ -106,7 +109,8 @@ class PetControls(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(top)
         layout.addWidget(plugin_box)
-        layout.addWidget(mood_box)
+        if mood_box is not None:
+            layout.addWidget(mood_box)
         layout.addWidget(event_box, 1)
 
         self._sync_plugin_checks()

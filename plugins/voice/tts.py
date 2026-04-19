@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 from core.platform_utils import resolve_executable
 from core.utils import unwrap_event_payload
@@ -36,19 +37,20 @@ class TextToSpeech:
         self._thread = None
         self._current_process = None
         self._play_lock = threading.Lock()
+        self._system_tts_lock = threading.Lock()
         self._interrupt_event = threading.Event()
         self._interrupt_on_new_speech = config.get("voice", {}).get("interrupt_on_new_speech", True)
+        self._follow_up_activation_delay = max(
+            0.0,
+            float(config.get("voice", {}).get("follow_up_activation_delay_seconds", 0.12)),
+        )
+        self.tts_backend = str(config.get("voice", {}).get("tts_backend", "piper")).strip().lower() or "piper"
         self.voice_model = config.get("voice", {}).get("tts_model", "en_US-lessac-medium")
         # Piper path (assume installed)
         self.piper_path = config.get("voice", {}).get("piper_path", "piper")
         self.speed_multiplier = 1.0  # adjust based on emotion
         self._system_tts = None
-        if PYTTSX3_AVAILABLE:
-            try:
-                self._system_tts = pyttsx3.init()
-            except Exception as e:
-                logger.warning(f"pyttsx3 initialisation failed: {e}")
-                self._system_tts = None
+        self._system_tts_failed = False
 
     def start(self):
         self._thread = threading.Thread(target=self._run)
@@ -110,18 +112,23 @@ class TextToSpeech:
                     self._interrupt_event.clear()
                     continue
                 self._publish_state("speaking", text)
-                if self._piper_is_available():
-                    self._speak_piper(text, speed)
-                elif self._system_tts is not None:
-                    self._speak_system_tts(text, speed)
-                else:
+                if self.tts_backend == "none":
                     self._print_text(text)
+                elif self.tts_backend == "pyttsx3":
+                    self._speak_system_tts(text, speed)
+                elif self._piper_is_available():
+                    self._speak_piper(text, speed)
+                else:
+                    self._speak_system_tts(text, speed)
+                # Always transition to idle before arming follow-up listening.
+                # This prevents STT from capturing the tail of the assistant's own speech.
+                setattr(self.bus, "_voice_followup_active", False)
+                self._publish_state("idle", text)
                 if listen_after:
+                    if self._follow_up_activation_delay > 0:
+                        time.sleep(self._follow_up_activation_delay)
                     setattr(self.bus, "_voice_followup_active", True)
                     self._publish_listen_for_reply(text)
-                else:
-                    setattr(self.bus, "_voice_followup_active", False)
-                self._publish_state("idle", text)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -151,10 +158,7 @@ class TextToSpeech:
                 self._play_audio_file(audio_file)
         except Exception as e:
             logger.warning(f"Piper execution error, falling back to terminal output: {e}")
-            if self._system_tts is not None:
-                self._speak_system_tts(text, speed)
-            else:
-                self._print_text(text)
+            self._speak_system_tts(text, speed)
         finally:
             try:
                 os.unlink(audio_file)
@@ -164,13 +168,30 @@ class TextToSpeech:
     def _piper_is_available(self):
         if not PIPER_AVAILABLE:
             return False
-        return resolve_executable(self.piper_path) is not None
+        if resolve_executable(self.piper_path) is None:
+            return False
+        model_path = str(self.voice_model or "").strip()
+        if not model_path:
+            return False
+        return Path(model_path).expanduser().exists()
 
     def _print_text(self, text):
         print(f"\n[E-Pet says]: {text}")
 
     def _speak_system_tts(self, text, speed):
         try:
+            if self._system_tts is None:
+                if self._system_tts_failed:
+                    raise RuntimeError("system TTS unavailable")
+                if not PYTTSX3_AVAILABLE:
+                    raise RuntimeError("pyttsx3 is unavailable")
+                with self._system_tts_lock:
+                    if self._system_tts is None:
+                        try:
+                            self._system_tts = pyttsx3.init()
+                        except Exception:
+                            self._system_tts_failed = True
+                            raise
             self._system_tts.setProperty("rate", int(170 * speed))
             self._system_tts.say(text)
             self._system_tts.runAndWait()
@@ -207,6 +228,11 @@ class TextToSpeech:
                 process.kill()
 
     def _play_audio_file(self, audio_file):
+        if os.name == "nt":
+            import winsound
+
+            winsound.PlaySound(audio_file, winsound.SND_FILENAME)
+            return
         tried = []
         for candidate in self._audio_player_candidates():
             player = resolve_executable(candidate[0])
@@ -239,12 +265,28 @@ class TextToSpeech:
                 break
 
     def _publish_state(self, state, text):
+        voice_state = {
+            "speaking": "RESPONDING",
+            "idle": "IDLE",
+            "stopped": "IDLE",
+            "error": "IDLE",
+        }.get(str(state).strip().lower(), str(state).strip().upper())
+        timestamp = time.time()
         self.bus.publish(
             "pet/voice/tts_state",
             {
                 "state": state,
                 "text": text,
-                "timestamp": time.time(),
+                "timestamp": timestamp,
+            },
+        )
+        self.bus.publish(
+            "pet/voice/state",
+            {
+                "state": voice_state,
+                "source": "tts",
+                "detail": text,
+                "timestamp": timestamp,
             },
         )
 

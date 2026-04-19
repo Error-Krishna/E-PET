@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import math
 import time
 import threading
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ class FaceWindow:
         self._quit_requested = threading.Event()
         self._subscriptions_active = False
         self._mood = self._initial_mood()
+        self._voice_state = "idle"
         self._running = False
         self._screen = None
         self._clock = None
@@ -75,6 +77,8 @@ class FaceWindow:
             return
 
         self.bus.subscribe("pet/emotion/changed", self._on_emotion_changed)
+        self.bus.subscribe("pet/voice/state", self._on_voice_state)
+        self.bus.subscribe("pet/voice/tts_state", self._on_tts_state)
         self.bus.subscribe("pet/system/quit", self._on_quit)
         self._subscriptions_active = True
 
@@ -113,6 +117,7 @@ class FaceWindow:
 
         mood = self._mood if self._mood in MOOD_STYLE else "neutral"
         self._draw_original_face(mood)
+        self._draw_voice_light()
         pygame.display.flip()
 
     def _draw_original_face(self, mood: str):
@@ -135,6 +140,26 @@ class FaceWindow:
         elif mood == "surprised":
             pygame.draw.circle(self._screen, (255, 255, 255), (center_x - 58, center_y - 56), 3)
             pygame.draw.circle(self._screen, (255, 255, 255), (center_x + 58, center_y - 56), 3)
+
+    def _draw_voice_light(self):
+        state = str(self._voice_state or "idle").strip().lower()
+        colors = {
+            "listening": (56, 189, 248),
+            "follow_up_listening": (34, 211, 238),
+            "processing": (251, 191, 36),
+            "responding": (74, 222, 128),
+            "idle": (148, 163, 184),
+        }
+        color = colors.get(state, (148, 163, 184))
+        pulse = 0.82 + 0.18 * (0.5 + 0.5 * math.sin(time.time() * 5.0))
+        outer = tuple(min(255, int(component * pulse)) for component in color)
+        center = (self._square_size - 58, 58)
+        pygame.draw.circle(self._screen, outer, center, 18)
+        pygame.draw.circle(self._screen, (255, 255, 255), center, 9)
+        font = pygame.font.SysFont("Helvetica", 11, bold=True)
+        label = "mic on" if state in {"listening", "follow_up_listening", "processing", "responding"} else "mic idle"
+        text = font.render(label, True, (226, 232, 240))
+        self._screen.blit(text, (self._square_size - 114, 80))
 
     def _draw_eyes(self, eye_type: str, center_x: int, center_y: int):
         left = (center_x - 72, center_y - 48)
@@ -216,6 +241,14 @@ class FaceWindow:
         data = unwrap_event_payload(data)
         self._enqueue(topic, data)
 
+    def _on_voice_state(self, topic: str, data: Any):
+        data = unwrap_event_payload(data)
+        self._enqueue(topic, data)
+
+    def _on_tts_state(self, topic: str, data: Any):
+        data = unwrap_event_payload(data)
+        self._enqueue(topic, data)
+
     def _on_quit(self, topic: str, data: Any):
         data = unwrap_event_payload(data)
         self._quit_requested.set()
@@ -240,6 +273,14 @@ class FaceWindow:
 
         if topic == "pet/emotion/changed":
             self._mood = str(data.get("mood", "neutral"))
+        elif topic == "pet/voice/state":
+            self._voice_state = str(data.get("state", "idle"))
+        elif topic == "pet/voice/tts_state":
+            state = str(data.get("state", "idle")).strip().lower()
+            if state == "speaking":
+                self._voice_state = "responding"
+            elif state in {"idle", "stopped", "error"} and self._voice_state == "responding":
+                self._voice_state = "idle"
 
     def _cleanup(self):
         self._running = False

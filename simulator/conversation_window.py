@@ -31,8 +31,10 @@ class ConversationWindow:
     size: tuple[int, int] = (520, 360)
 
     def __post_init__(self):
-        if not PYGAME_AVAILABLE:
-            raise RuntimeError(f"pygame is unavailable for the conversation window: {PYGAME_IMPORT_ERROR}")
+        self._available = bool(PYGAME_AVAILABLE)
+        if not self._available:
+            logger.warning("GUI: conversation window unavailable: %s", PYGAME_IMPORT_ERROR)
+            return
 
         self._running = False
         self._quit_requested = False
@@ -44,6 +46,8 @@ class ConversationWindow:
         self._last_update = 0.0
 
     def run(self):
+        if not self._available:
+            return
         pygame.init()
         try:
             self._window = pygame.display.set_mode(self.size)

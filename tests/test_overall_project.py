@@ -32,6 +32,7 @@ from plugins.os_bridge import executor as os_bridge_executor_module
 from plugins.os_bridge import plugin as os_bridge_plugin
 from plugins.os_bridge.actions import apps as os_bridge_apps_module
 from plugins.os_bridge.actions import keyboard as os_bridge_keyboard_module
+from plugins.os_bridge.intent_parser import parse_command
 from plugins.os_bridge.executor import OSBridgeExecutor
 from plugins.sound.engine import SoundEngine
 from plugins.voice import plugin as voice_plugin
@@ -68,11 +69,17 @@ class BaseOverallTest(unittest.TestCase):
                     "wake_word": "hello",
                     "wake_mode": "whisper",
                     "piper_path": "piper",
-                    "tts_model": "/Users/krishnagoyal/Desktop/epet/voices/en_US-lessac-medium.onnx",
-                    "whisper_model": "tiny",
+                    "tts_model": "",
+                    "whisper_model": "base",
                     "wake_whisper_model": "tiny",
-                    "record_seconds": 1,
+                    "stt_language": "en",
+                    "stt_beam_size": 5,
                     "wake_listen_seconds": 1,
+                    "follow_up_listen_seconds": 2,
+                    "conversation_window_seconds": 8.0,
+                    "silence_threshold_seconds": 1.4,
+                    "min_speech_duration_seconds": 0.35,
+                    "vad_sensitivity": 0.65,
                     "wake_check_interval": 0.1,
                     "wake_cooldown_seconds": 0.5,
                     "interrupt_on_new_speech": True,
@@ -122,6 +129,12 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(DEFAULT_CONFIG["ai"]["ollama_num_predict"], 96)
         self.assertTrue(DEFAULT_CONFIG["event_bus"]["ordered"])
         self.assertEqual(DEFAULT_CONFIG["voice"]["wake_mode"], "auto")
+        self.assertEqual(DEFAULT_CONFIG["voice"]["whisper_model"], "base")
+        self.assertEqual(DEFAULT_CONFIG["voice"]["stt_language"], "en")
+        self.assertEqual(DEFAULT_CONFIG["voice"]["stt_beam_size"], 5)
+        self.assertEqual(DEFAULT_CONFIG["voice"]["conversation_window_seconds"], 8.0)
+        self.assertEqual(DEFAULT_CONFIG["voice"]["silence_threshold_seconds"], 1.4)
+        self.assertEqual(DEFAULT_CONFIG["voice"]["vad_sensitivity"], 0.65)
         self.assertEqual(DEFAULT_CONFIG["os_bridge"]["max_retries"], 2)
         self.assertFalse(DEFAULT_CONFIG["os_bridge"]["continue_on_failure"])
         self.assertFalse(DEFAULT_CONFIG["os_bridge"]["verify_after_actions"])
@@ -134,8 +147,11 @@ class TestConfigAndPlatform(BaseOverallTest):
                 "logging": {"level": "verbose"},
                 "idle": {"bored_after": 50, "sleepy_after": 10},
                 "voice": {
-                    "record_seconds": 0,
                     "wake_listen_seconds": 0,
+                    "conversation_window_seconds": 0,
+                    "silence_threshold_seconds": 0.1,
+                    "min_speech_duration_seconds": 0.0,
+                    "vad_sensitivity": 2.0,
                     "wake_check_interval": 0.01,
                     "wake_cooldown_seconds": 0.1,
                 },
@@ -145,8 +161,11 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertEqual(config["plugins"]["enabled"], ["emotion", "sound"])
         self.assertEqual(config["logging"]["level"], "INFO")
         self.assertEqual(config["idle"]["sleepy_after"], 50)
-        self.assertEqual(config["voice"]["record_seconds"], 1)
         self.assertEqual(config["voice"]["wake_listen_seconds"], 1)
+        self.assertGreaterEqual(config["voice"]["conversation_window_seconds"], 1.0)
+        self.assertGreaterEqual(config["voice"]["silence_threshold_seconds"], 0.5)
+        self.assertGreaterEqual(config["voice"]["min_speech_duration_seconds"], 0.1)
+        self.assertGreaterEqual(config["voice"]["vad_sensitivity"], 0.0)
         self.assertGreaterEqual(config["voice"]["wake_check_interval"], 0.1)
         self.assertGreaterEqual(config["voice"]["wake_cooldown_seconds"], 0.5)
         self.assertGreaterEqual(config["ai"]["request_timeout"], 5)
@@ -155,7 +174,7 @@ class TestConfigAndPlatform(BaseOverallTest):
         self.assertTrue(get_config_path().is_absolute())
         self.assertEqual(get_config_path().name, "config.yaml")
         self.assertTrue(get_database_path().is_absolute())
-        self.assertEqual(get_database_path().name, "epet.db")
+        self.assertEqual(get_database_path().name, "epet.kv.json")
         self.assertIsNotNone(resolve_executable(sys.executable))
 
     def test_profile_decorator_preserves_return_value(self):
@@ -174,12 +193,29 @@ class TestConfigAndPlatform(BaseOverallTest):
 
     def test_memory_creates_parent_directories(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            nested = Path(tmpdir) / "nested" / "sub" / "epet.db"
+            nested = Path(tmpdir) / "nested" / "sub" / "epet.kv.json"
             memory = Memory(str(nested))
             try:
                 memory.set("hello", "world")
                 self.assertEqual(memory.get("hello"), "world")
                 self.assertTrue(nested.exists())
+            finally:
+                memory.close()
+
+    def test_legacy_memory_file_is_used_as_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_path = Path(tmpdir) / "epet.db"
+            legacy_memory = Memory(str(legacy_path))
+            try:
+                legacy_memory.set("legacy_key", "legacy_value")
+            finally:
+                legacy_memory.close()
+
+            new_path = Path(tmpdir) / "epet.kv.json"
+            memory = Memory(str(new_path))
+            try:
+                self.assertEqual(memory.get("legacy_key"), "legacy_value")
+                self.assertTrue(new_path.exists())
             finally:
                 memory.close()
 
@@ -212,6 +248,20 @@ class TestEventBusAndMemory(BaseOverallTest):
         self.assertEqual(len(calls), 2)
         self.assertIn("cb1", calls)
         self.assertIn("cb2", calls)
+
+    def test_unsubscribe_removes_callback(self):
+        calls = []
+
+        def callback(topic, data):
+            calls.append((topic, data))
+
+        self.bus.subscribe("pet/test/unsub", callback)
+        self.bus.publish("pet/test/unsub", {"first": True})
+        self.wait()
+        self.bus.unsubscribe("pet/test/unsub", callback)
+        self.bus.publish("pet/test/unsub", {"second": True})
+        self.wait()
+        self.assertEqual(calls, [("pet/test/unsub", {"first": True})])
 
     def test_no_matching_subscriber_is_safe(self):
         self.bus.publish("nonexistent", "data")
@@ -320,16 +370,23 @@ class TestEventBusAndMemory(BaseOverallTest):
         self.assertEqual(self.memory.get("current_mood"), "sleepy")
         self.assertEqual(self.memory.recall("bond", "favorite_zone"), "chin")
 
+    def test_memory_search_returns_relevant_matches(self):
+        self.memory.set("assistant_mode", "true")
+        self.memory.remember("facts", "likes", "robotics")
+        self.memory.log_event("task", '{"summary": "opened TextEdit"}')
+        matches = self.memory.search("robotics", limit=5)
+        self.assertTrue(matches)
+        self.assertTrue(any(match["source"] in {"kv", "memory"} for match in matches))
+
     def test_event_log_is_persisted(self):
         self.memory.log_event("touch", '{"zone": "head"}')
-        rows = self.memory.conn.execute("SELECT event_type, data FROM events").fetchall()
-        self.assertEqual(rows, [("touch", '{"zone": "head"}')])
+        rows = self.memory.get_events(limit=10)
+        self.assertEqual(rows[-1]["event_type"], "touch")
+        self.assertEqual(rows[-1]["data"], '{"zone": "head"}')
 
-    def test_sqlite_pragmas_are_enabled(self):
-        journal_mode = self.memory.conn.execute("PRAGMA journal_mode").fetchone()[0]
-        synchronous = self.memory.conn.execute("PRAGMA synchronous").fetchone()[0]
-        self.assertEqual(str(journal_mode).lower(), "wal")
-        self.assertEqual(int(synchronous), 1)
+    def test_memory_backend_is_kv_store(self):
+        self.assertEqual(self.memory.backend, "kv")
+        self.assertTrue(self.memory.stats()["memory_count"] >= 0)
 
     def test_data_persists_across_reopen(self):
         self.memory.set("current_mood", "love")
@@ -400,6 +457,22 @@ class TestPluginLoaderAndWiring(BaseOverallTest):
         self.wait()
         self.assertEqual(received, [])
 
+    def test_loader_respects_config_order_for_plugin_startup(self):
+        self._write_plugin(
+            "alpha",
+            "def start(bus, hal, memory, config):\n    bus.publish('plugin/order', {'name': 'alpha'})\n",
+        )
+        self._write_plugin(
+            "beta",
+            "def start(bus, hal, memory, config):\n    bus.publish('plugin/order', {'name': 'beta'})\n",
+        )
+        received = []
+        self.bus.subscribe("plugin/order", lambda topic, data: received.append(data["name"]))
+        loader = PluginLoader(["beta", "alpha"], self.bus, self.hal, self.memory, self.config, plugins_dir=self.plugins_dir)
+        loader.load_plugins()
+        self.wait()
+        self.assertEqual(received[:2], ["beta", "alpha"])
+
     def test_ai_plugin_start_sets_bus_references(self):
         fake_manager = mock.Mock()
         fake_brain = mock.Mock()
@@ -467,8 +540,10 @@ class TestOSBridge(BaseOverallTest):
         executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
         executor.delay_between_actions = 0
         statuses = []
+        results = []
         calls = []
         self.bus.subscribe("pet/task/status", lambda topic, data: statuses.append(data))
+        self.bus.subscribe("pet/os_bridge/result", lambda topic, data: results.append(data))
         with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=lambda name: calls.append(("open_app", name))), \
              mock.patch.object(os_bridge_executor_module, "type_text", side_effect=lambda text: calls.append(("type_text", text))):
             executor._execute_task(
@@ -487,6 +562,9 @@ class TestOSBridge(BaseOverallTest):
         state = executor.get_task_state("task_123")
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["current_step"], 2)
+        self.assertTrue(results)
+        self.assertEqual(results[-1]["task_id"], "task_123")
+        self.assertEqual(results[-1]["status"], "completed")
 
     def test_os_bridge_executor_supports_save_file_open_url_and_screen_reading(self):
         cfg = json.loads(json.dumps(self.config))
@@ -552,6 +630,25 @@ class TestOSBridge(BaseOverallTest):
         self.assertEqual(state["status"], "completed")
         self.assertTrue(any(item["status"] == "running" and item["step"] == 1 for item in statuses))
 
+    def test_os_bridge_executor_routes_youtube_app_requests_to_the_browser(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        opened_urls = []
+        opened_apps = []
+        with mock.patch.object(os_bridge_executor_module, "open_url", side_effect=lambda url: opened_urls.append(url)), \
+             mock.patch.object(os_bridge_executor_module, "open_app", side_effect=lambda name: opened_apps.append(name)):
+            executor._execute_task(
+                {
+                    "task_id": "task_youtube",
+                    "actions": [
+                        {"step": 1, "type": "open_app", "target": "YouTube"},
+                    ],
+                }
+            )
+
+        self.assertEqual(opened_apps, [])
+        self.assertEqual(opened_urls, ["https://www.youtube.com"])
+        self.assertEqual(executor.get_task_state("task_youtube")["status"], "completed")
+
     def test_os_bridge_executor_handles_invalid_app_name_failure(self):
         executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
         statuses = []
@@ -572,6 +669,23 @@ class TestOSBridge(BaseOverallTest):
         self.wait(0.2)
         self.assertEqual(statuses[-1]["status"], "failed")
         self.assertIn("app not found", statuses[-1]["error"])
+
+    def test_os_bridge_executor_does_not_retry_non_retryable_launch_failures(self):
+        executor = OSBridgeExecutor(self.bus, self.hal, self.memory, self.config)
+        executor.delay_between_actions = 0
+        executor.retry_delay = 0
+        attempts = []
+        with mock.patch.object(os_bridge_executor_module, "open_app", side_effect=lambda name: attempts.append(name) or (_ for _ in ()).throw(FileNotFoundError("app not found: missing"))):
+            executor._execute_task(
+                {
+                    "task_id": "task_no_retry",
+                    "actions": [
+                        {"step": 1, "type": "open_app", "target": "missing"},
+                    ],
+                }
+            )
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(executor.get_task_state("task_no_retry")["status"], "failed")
 
     def test_os_bridge_executor_can_continue_after_failure_when_configured(self):
         cfg = json.loads(json.dumps(self.config))
@@ -661,8 +775,8 @@ class TestOSBridge(BaseOverallTest):
             win_process.wait.return_value = 0
             popen.return_value = win_process
             os_bridge_apps_module.open_app("notepad")
-        self.assertEqual(popen.call_args.args[0], ["start", "notepad"])
-        self.assertTrue(popen.call_args.kwargs["shell"])
+        self.assertEqual(popen.call_args.args[0], ["cmd", "/c", "start", "", "notepad"])
+        self.assertFalse(popen.call_args.kwargs["shell"])
 
         with mock.patch.object(os_bridge_apps_module.platform, "system", return_value="linux"), \
              mock.patch.object(os_bridge_apps_module.subprocess, "Popen") as popen_linux:
@@ -751,6 +865,21 @@ class TestEmotionIdleSoundAndRenderer(BaseOverallTest):
         self.wait()
         self.assertEqual(self.emotion.current_mood, "sleepy")
 
+    def test_assistant_mode_ignores_mood_changes(self):
+        assistant_config = json.loads(json.dumps(self.config))
+        assistant_config["personality"]["assistant_mode"] = True
+        assistant_emotion = EmotionEngine(self.bus, self.hal, self.memory, assistant_config)
+        try:
+            assistant_emotion.start()
+            self.bus.publish("pet/input/touch", {"zone": "head"})
+            self.bus.publish("pet/system/tick", {"timestamp": time.time()})
+            self.bus.publish("pet/ai/response", {"emotion_suggestion": "happy"})
+            self.wait()
+            self.assertEqual(assistant_emotion.current_mood, "neutral")
+            self.assertEqual(self.hal.get_state().get("face"), "neutral")
+        finally:
+            assistant_emotion.stop()
+
     def test_touch_resets_idle_timer(self):
         before = time.time() - 100
         self.emotion.last_interaction_time = before
@@ -762,6 +891,12 @@ class TestEmotionIdleSoundAndRenderer(BaseOverallTest):
         self.emotion.stop()
         self.wait(0.18)
         self.bus.publish("pet/system/tick", {"timestamp": time.time()})
+        self.wait()
+        self.assertEqual(self.emotion.current_mood, "neutral")
+
+    def test_stopped_engine_ignores_touch_event(self):
+        self.emotion.stop()
+        self.bus.publish("pet/input/touch", {"zone": "head"})
         self.wait()
         self.assertEqual(self.emotion.current_mood, "neutral")
 
@@ -966,6 +1101,12 @@ class TestAIAndVoiceStack(BaseOverallTest):
         finally:
             reloaded.stop()
 
+    def test_memory_manager_returns_relevant_memory_for_query(self):
+        self.bus.publish("pet/input/speech", {"text": "I like robotics", "confidence": 1.0})
+        self.wait()
+        context = self.memory_manager.get_context(query="robotics")
+        self.assertIn("robotics", context)
+
     def test_ai_brain_groq_payload_uses_configured_model_and_limits_output(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
         fake_response = mock.Mock()
@@ -1117,6 +1258,41 @@ class TestAIAndVoiceStack(BaseOverallTest):
         prompt = groq_call.call_args.args[0]
         self.assertIn("You are Mochi", prompt)
 
+    def test_ai_brain_assistant_mode_uses_neutral_assistant_prompt(self):
+        assistant_config = json.loads(json.dumps(self.config))
+        assistant_config["personality"]["assistant_mode"] = True
+        brain = AIBrain(self.bus, self.hal, self.memory, assistant_config)
+        with mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok","emotion_suggestion":"happy"}') as groq_call:
+            brain._process_ai_request("hello")
+        prompt = groq_call.call_args.args[0]
+        self.assertIn("practical, technically competent AI assistant", prompt)
+        self.assertNotIn("warm virtual pet", prompt)
+        self.assertIsNone(self.memory.get("current_mood"))
+
+    def test_ai_brain_publishes_plan_event(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        plans = []
+        self.bus.subscribe("pet/ai/plan", lambda topic, data: plans.append(data))
+        with mock.patch.object(brain, "_groq_inference", return_value='{"text":"ok","intent":"task","emotion_suggestion":"neutral","actions":[{"step":1,"type":"open_app","target":"TextEdit"}]}'):
+            brain._process_ai_request("open TextEdit")
+            self.wait(0.3)
+        self.assertTrue(plans)
+        self.assertEqual(plans[-1]["intent"], "task")
+        self.assertTrue(plans[-1]["steps"])
+        self.assertEqual(plans[-1]["steps"][0]["type"], "open_app")
+
+    def test_ai_brain_executes_parsed_command_without_waiting_for_model(self):
+        brain = AIBrain(self.bus, self.hal, self.memory, self.config)
+        actions = []
+        self.bus.subscribe("pet/ai/action", lambda topic, data: actions.append(data))
+        with mock.patch.object(brain, "_groq_inference") as groq_call:
+            brain._process_ai_request("search for lofi beats on YouTube for you now")
+            self.wait(0.2)
+        groq_call.assert_not_called()
+        self.assertTrue(actions)
+        self.assertEqual(actions[-1]["actions"][0]["type"], "youtube_search")
+        self.assertEqual(actions[-1]["actions"][0]["query"], "lofi beats")
+
     def test_ai_brain_invalid_json_falls_back(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
         events = []
@@ -1159,6 +1335,22 @@ class TestAIAndVoiceStack(BaseOverallTest):
         ])
         self.assertEqual(self.memory.recall("facts", "name"), "Krishna")
 
+    def test_intent_parser_routes_youtube_and_web_commands(self):
+        parsed = parse_command("open YouTube")
+        self.assertTrue(parsed.matched)
+        self.assertEqual(parsed.actions[0]["type"], "open_website")
+        self.assertEqual(parsed.actions[0]["name"].lower(), "youtube")
+
+        parsed = parse_command("play Tom and Jerry video")
+        self.assertTrue(parsed.matched)
+        self.assertEqual(parsed.actions[0]["type"], "youtube_search")
+        self.assertEqual(parsed.actions[0]["query"], "Tom and Jerry")
+
+        parsed = parse_command("search for lofi beats on YouTube for you now")
+        self.assertTrue(parsed.matched)
+        self.assertEqual(parsed.actions[0]["type"], "youtube_search")
+        self.assertEqual(parsed.actions[0]["query"], "lofi beats")
+
     def test_ai_question_requests_follow_up_listen(self):
         brain = AIBrain(self.bus, self.hal, self.memory, self.config)
         speaks = []
@@ -1176,6 +1368,8 @@ class TestAIAndVoiceStack(BaseOverallTest):
     def test_tts_fallback_prints_text(self):
         tts = TextToSpeech(self.bus, self.hal, self.memory, self.config)
         with mock.patch.object(tts_module, "PIPER_AVAILABLE", False), \
+             mock.patch.object(tts_module, "PYTTSX3_AVAILABLE", False), \
+             mock.patch.object(tts_module, "pyttsx3", None), \
              mock.patch("builtins.print") as mocked_print:
             tts._system_tts = None
             tts.start()
@@ -1188,9 +1382,12 @@ class TestAIAndVoiceStack(BaseOverallTest):
 
     def test_tts_requests_followup_reply(self):
         followups = []
+        states = []
         self.bus.subscribe("pet/voice/listen_for_reply", lambda topic, data: followups.append(data))
+        self.bus.subscribe("pet/voice/tts_state", lambda topic, data: states.append(data["state"]))
         tts = TextToSpeech(self.bus, self.hal, self.memory, self.config)
         with mock.patch.object(tts_module, "PIPER_AVAILABLE", False), \
+             mock.patch.object(tts, "_speak_system_tts"), \
              mock.patch.object(tts, "_print_text"):
             tts.start()
             try:
@@ -1202,6 +1399,10 @@ class TestAIAndVoiceStack(BaseOverallTest):
             finally:
                 tts.stop()
         self.assertTrue(followups)
+        # Ensure follow-up listen is armed only after TTS has returned to idle.
+        self.assertIn("speaking", states)
+        self.assertIn("idle", states)
+        self.assertLess(states.index("speaking"), states.index("idle"))
 
     def test_tts_stop_publishes_state(self):
         tts = TextToSpeech(self.bus, self.hal, self.memory, self.config)
@@ -1259,6 +1460,67 @@ class TestAIAndVoiceStack(BaseOverallTest):
                 stt.stop()
         record.assert_called_once()
 
+    def test_stt_defers_followup_recording_until_tts_idle(self):
+        fake_model = mock.Mock()
+        fake_recorder = mock.Mock(frame_length=1024)
+        fake_recorder.start.return_value = None
+        fake_recorder.stop.return_value = None
+        fake_recorder.delete.return_value = None
+        fake_recorder.read.return_value = [0] * 1024
+        with mock.patch.object(stt_module, "WHISPER_AVAILABLE", True), \
+             mock.patch.object(stt_module, "WhisperModel", return_value=fake_model), \
+             mock.patch.object(stt_module, "PvRecorder", return_value=fake_recorder), \
+             mock.patch.object(stt_module, "pyaudio", None):
+            stt = SpeechToText(self.bus, self.hal, self.memory, self.config)
+        with mock.patch.object(stt, "_record_and_transcribe") as record:
+            stt.start()
+            try:
+                self.wait(0.05)
+                self.bus.publish("pet/voice/tts_state", {"state": "speaking"})
+                self.bus.publish("pet/voice/listen_for_reply", {"source": "tts"})
+                self.wait(0.08)
+                self.assertEqual(record.call_count, 0)
+                self.bus.publish("pet/voice/tts_state", {"state": "idle"})
+                self.wait(0.12)
+            finally:
+                stt.stop()
+        record.assert_called_once()
+
+    def test_stt_drops_probable_tts_echo_and_retries_followup(self):
+        fake_model = mock.Mock()
+        fake_recorder = mock.Mock(frame_length=1024)
+        fake_recorder.start.return_value = None
+        fake_recorder.stop.return_value = None
+        fake_recorder.delete.return_value = None
+        fake_recorder.read.return_value = [0] * 1024
+        with mock.patch.object(stt_module, "WHISPER_AVAILABLE", True), \
+             mock.patch.object(stt_module, "WhisperModel", return_value=fake_model), \
+             mock.patch.object(stt_module, "PvRecorder", return_value=fake_recorder), \
+             mock.patch.object(stt_module, "pyaudio", None):
+            stt = SpeechToText(self.bus, self.hal, self.memory, self.config)
+
+        followups = []
+        speech_events = []
+        self.bus.subscribe("pet/voice/listen_for_reply", lambda topic, data: followups.append(data))
+        self.bus.subscribe("pet/input/speech", lambda topic, data: speech_events.append(data))
+        stt.echo_guard_seconds = 0.3
+        stt.echo_retry_backoff_seconds = 0.01
+        stt.echo_retry_limit = 1
+        stt._last_tts_text = "How are you doing today"
+        stt._last_tts_finished_at = time.time()
+        try:
+            with mock.patch.object(stt, "_capture_speech_frames", return_value=stt_module._CaptureResult(frames=[[1] * 1024], backend="recorder")), \
+                 mock.patch.object(stt, "_transcribe_frames", return_value="how are you doing today"):
+                stt._current_source = "follow_up"
+                stt._record_and_transcribe()
+            self.wait(0.45)
+        finally:
+            stt.stop()
+
+        self.assertFalse(speech_events)
+        self.assertTrue(followups)
+        self.assertEqual(followups[-1]["source"], "stt_echo_guard")
+
     def test_stt_transcribe_uses_beam_size_one(self):
         fake_model = mock.Mock()
         fake_model.transcribe.return_value = ([SimpleNamespace(text="hello"), SimpleNamespace(text="world")], None)
@@ -1272,18 +1534,24 @@ class TestAIAndVoiceStack(BaseOverallTest):
              mock.patch.object(stt_module, "PvRecorder", return_value=fake_recorder), \
              mock.patch.object(stt_module, "pyaudio", None):
             stt = SpeechToText(self.bus, self.hal, self.memory, self.config)
+            stt.model = fake_model
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             path = handle.name
         try:
-            self.assertEqual(stt.transcribe(path), "hello world")
-            fake_model.transcribe.assert_called_once_with(path, beam_size=1)
+            with mock.patch.object(stt, "_ensure_model_loaded"):
+                self.assertEqual(stt.transcribe(path), "hello world")
+            fake_model.transcribe.assert_called_once()
+            kwargs = fake_model.transcribe.call_args.kwargs
+            self.assertEqual(kwargs["beam_size"], 5)
+            self.assertEqual(kwargs["language"], "en")
+            self.assertTrue(kwargs["vad_filter"])
+            self.assertFalse(kwargs["condition_on_previous_text"])
         finally:
             os.unlink(path)
             stt.stop()
 
     def test_stt_emits_transcript_event(self):
         fake_model = mock.Mock()
-        fake_model.transcribe.return_value = ([SimpleNamespace(text="hello gui")], None)
         fake_recorder = mock.Mock(frame_length=1024)
         fake_recorder.start.return_value = None
         fake_recorder.stop.return_value = None
@@ -1298,7 +1566,10 @@ class TestAIAndVoiceStack(BaseOverallTest):
         events = []
         self.bus.subscribe("pet/voice/transcript", lambda topic, data: events.append(data))
         try:
-            stt._record_and_transcribe()
+            with mock.patch.object(stt, "_capture_speech_frames", return_value=stt_module._CaptureResult(frames=[[1] * 1024], backend="recorder")), \
+                 mock.patch.object(stt, "_transcribe_frames", return_value="hello gui"):
+                stt._current_source = "wake_word"
+                stt._record_and_transcribe()
             self.wait(0.2)
         finally:
             stt.stop()
@@ -1306,6 +1577,34 @@ class TestAIAndVoiceStack(BaseOverallTest):
         self.assertTrue(events)
         self.assertEqual(events[-1]["text"], "hello gui")
         self.assertEqual(events[-1]["source"], "microphone")
+
+    def test_stt_publishes_voice_state_transitions(self):
+        fake_model = mock.Mock()
+        fake_recorder = mock.Mock(frame_length=1024)
+        fake_recorder.start.return_value = None
+        fake_recorder.stop.return_value = None
+        fake_recorder.delete.return_value = None
+        fake_recorder.read.return_value = [0] * 1024
+        with mock.patch.object(stt_module, "WHISPER_AVAILABLE", True), \
+             mock.patch.object(stt_module, "WhisperModel", return_value=fake_model), \
+             mock.patch.object(stt_module, "PvRecorder", return_value=fake_recorder), \
+             mock.patch.object(stt_module, "pyaudio", None):
+            stt = SpeechToText(self.bus, self.hal, self.memory, self.config)
+
+        states = []
+        self.bus.subscribe("pet/voice/state", lambda topic, data: states.append(data["state"]))
+        try:
+            with mock.patch.object(stt, "_capture_speech_frames", return_value=stt_module._CaptureResult(frames=[[1] * 1024], backend="recorder")), \
+                 mock.patch.object(stt, "_transcribe_frames", return_value="hello again"):
+                stt._current_source = "follow_up"
+                stt._record_and_transcribe()
+                self.wait(0.2)
+        finally:
+            stt.stop()
+
+        self.assertIn("FOLLOW_UP_LISTENING", states)
+        self.assertIn("PROCESSING", states)
+        self.assertEqual(states[-1], "IDLE")
 
     def test_wake_mode_selects_whisper_without_porcupine(self):
         fake_recorder = mock.Mock(frame_length=1024)
@@ -1340,7 +1639,7 @@ class TestAIAndVoiceStack(BaseOverallTest):
         fake_recorder.start.return_value = None
         fake_recorder.stop.return_value = None
         fake_recorder.delete.return_value = None
-        fake_recorder.read.return_value = [0] * 1024
+        fake_recorder.read.return_value = [2000] * 1024
         with mock.patch.object(wake_module, "PORCUPINE_AVAILABLE", False), \
              mock.patch.object(wake_module, "WHISPER_WAKE_AVAILABLE", True), \
              mock.patch.object(wake_module, "WhisperModel", return_value=fake_model), \
@@ -1349,6 +1648,12 @@ class TestAIAndVoiceStack(BaseOverallTest):
             result = detector._capture_and_transcribe_phrase()
         self.assertEqual(result, "hello world")
         fake_model.transcribe.assert_called_once()
+        detector.stop()
+
+    def test_wake_phrase_fuzzy_match_handles_minor_transcription_error(self):
+        detector = WakeWordDetector(self.bus, self.hal, self.memory, self.config)
+        detector.wake_word = "cosmos"
+        self.assertTrue(detector._contains_wake_phrase("cosmo please open notes"))
         detector.stop()
 
     def test_wake_stop_tolerates_missing_stream(self):

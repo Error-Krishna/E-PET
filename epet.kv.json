@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "kv": {
+    "current_mood": "neutral",
+    "smoke_test": "ok"
+  },
+  "memories": {
+    "facts": {
+      "name": "krishna",
+      "start_file": "main.py",
+      "libraries": "['Python', 'Flask', 'SQLite', 'JavaScript libraries']"
+    },
+    "personality": {
+      "interaction_count": "219",
+      "bond_level": "1.00",
+      "last_topic": "general",
+      "topic:food": "5",
+      "topic:pets": "6",
+      "topic:games": "5",
+      "topic:learning": "6",
+      "topic:fitness": "5",
+      "topic:art": "11",
+      "topic:work": "5",
+      "topic:coding": "7",
+      "topic:movies": "6",
+      "topic:music": "1"
+    },
+    "conversation": {
+      "history": "[{\"role\": \"user\", \"text\": \"So, let's talk a little bit about this.\", \"timestamp\": 1776621802.371352}, {\"role\": \"assistant\", \"text\": \"It seems we were in the middle of a conversation about my technical configurations and abilities. If you'd like to continue discussing a specific topic or ask a new question, I'll do my best to assist you. Otherwise, please let me know how I can help you today.\", \"timestamp\": 1776621803.040384}, {\"role\": \"user\", \"text\": \"Ask me a question\", \"timestamp\": 1776621826.823651}, {\"role\": \"assistant\", \"text\": \"Can you recall our previous discussion about your technical configurations, especially how I recall storing conversation history and recalling specific information, and my ability to perform tasks based on procedural tasks and actions?\", \"timestamp\": 1776621827.363486}, {\"role\": \"user\", \"text\": \"I'm glad you didn't get wild.\", \"timestamp\": 1776621831.383167}, {\"role\": \"assistant\", \"text\": \"I'm glad you're enjoying our conversation. I'm here to assist you, so please let me know how I can help you today.\", \"timestamp\": 1776621831.8681421}, {\"role\": \"user\", \"text\": \"Ask me a question\", \"timestamp\": 1776621848.8392792}, {\"role\": \"assistant\", \"text\": \"Can you recall our previous discussion about your technical configurations, especially how I recall storing conversation history and recalling specific information, and my ability to perform tasks based on procedural tasks and actions?\", \"timestamp\": 1776621849.260122}, {\"role\": \"user\", \"text\": \"So, listen, listen to me, I don't know what the sense of that sense is, I told him about Real Manor, I knew a lot of things.  So, I ate it and ate it.  I can't believe it.\", \"timestamp\": 1776621864.541197}, {\"role\": \"assistant\", \"text\": \"It's unclear what you're referring to. However, I can see that we previously discussed my technical configurations and abilities. If you'd like to continue discussing a specific topic or ask a new question, I'll do my best to assist you. Otherwise, please let me know how I can help you today.\", \"timestamp\": 1776621865.195335}, {\"role\": \"user\", \"text\": \"Ask me a question.\", \"timestamp\": 1776621894.101281}, {\"role\": \"assistant\", \"text\": \"Can you explain the relationship between my stored conversation history and my ability to recall specific information?\", \"timestamp\": 1776621894.779637}, {\"role\": \"user\", \"text\": \"Ask me a question.\", \"timestamp\": 1776622224.938431}, {\"role\": \"assistant\", \"text\": \"Can you explain the relationship between my stored conversation history and my ability to recall specific information?\", \"timestamp\": 1776622227.475997}, {\"role\": \"user\", \"text\": \"Can you explain the relationship between my stored conversation history and my ability to recall specific information?\", \"timestamp\": 1776622238.058967}, {\"role\": \"assistant\", \"text\": \"Your stored conversation history allows me to recall specific information by referencing and analyzing past interactions. I store and process conversation history to facilitate efficient recall of previously discussed topics, including technical configurations and abilities. This enables me to provide relevant and accurate responses to subsequent questions and tasks based on the context of our previous conversations.\", \"timestamp\": 1776622239.908124}, {\"role\": \"user\", \"text\": \"Ask me a question.\", \"timestamp\": 1776622647.04452}, {\"role\": \"assistant\", \"text\": \"I'll ask you a question to test my ability to analyze our conversation history. Can you recall the relationship between the procedural tasks I've been assigned and my ability to perform them based on the context of our previous conversations?\", \"timestamp\": 1776622648.4790888}, {\"role\": \"user\", \"text\": \"I'll ask you a question to test my ability to analyse our conversation history.  Can you recall the relationship between the procedural tasks I've been assigned in my ability  to perform them based on the context of our previous conversations?\", \"timestamp\": 1776622667.407797}, {\"role\": \"assistant\", \"text\": \"Based on our conversation history, I can recall that our procedural tasks are related to my ability to perform them based on the context of our previous conversations. I store and process conversation history to facilitate efficient recall of previously discussed topics, including technical configurations and abilities. This enables me to provide relevant and accurate responses to subsequent questions and tasks based on the context of our previous conversations. For example, in our previous discussion, you assigned me the procedural task of opening the YouTube and Play Carif, which I was able to recall and perform based on the conversation history. This suggests that there is a direct relationship between the procedural tasks I've been assigned and my ability to perform them based on the context of our previous conversations.\", \"timestamp\": 1776622668.129588}]"
+    },
+    "procedural": {
+      "task:task_1776608959769_80334a45:status": "completed",
+      "task:task_1776608959769_80334a45:step": "1",
+      "task:task_1776608959769_80334a45:message": "opening the YouTube and Play Carif",
+      "task:task_1776608959769_80334a45:summary": "opening the YouTube and Play Carif",
+      "task:task_1776608959769_80334a45:actions": "open_app",
+      "procedural:task_result:success": "4",
+      "procedural:action:open_app:success": "1",
+      "task:task_1776609038636_914094fc:status": "completed",
+      "task:task_1776609038636_914094fc:step": "1",
+      "task:task_1776609038636_914094fc:message": "running action",
+      "task:task_1776609038636_914094fc:summary": "running action",
+      "task:task_1776609038636_914094fc:actions": "youtube_search",
+      "procedural:action:youtube_search:success": "1"
+    }
+  },
+  "events": [],
+  "meta": {
+    "created_at": 1776554079.389777,
+    "next_event_id": 1,
+    "updated_at": 1776622686.436688
+  }
+}

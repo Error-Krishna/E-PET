@@ -43,6 +43,10 @@ Native control center:
 python epet_gui/main.py
 ```
 
+If you are launching from an integrated shell or other environment that the
+control center rejects on macOS, set `EPET_GUI_FORCE_LAUNCH=1` to bypass the
+preflight check.
+
 Streamlit dashboard:
 
 ```bash
@@ -52,7 +56,7 @@ streamlit run streamlit_app.py
 ## Project Files
 
 - `config.yaml` holds the runtime configuration
-- `epet.db` stores persistent memory
+- `epet.kv.json` stores persistent memory
 - `.epet_state.json` and `.epet_cmd.json` are used by the GUI bridge
 - `epet.log` captures runtime logs when logging is configured to write to file
 
@@ -79,6 +83,7 @@ For voice models, point `voice.tts_model` at a real Piper `.onnx` file if you wa
 - `m` cycle moods
 - `t` play test sound
 - `SPACE` wake trigger fallback
+- `/` text command mode
 - `q` quit
 
 ## Tests

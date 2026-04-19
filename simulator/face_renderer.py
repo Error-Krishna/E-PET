@@ -13,6 +13,7 @@ class SimpleRenderer:
         self.hal = hal
         self.memory = memory
         self.config = config
+        self.assistant_mode = bool(config.get("personality", {}).get("assistant_mode", False))
         self._running = True
         self.current_mood = "neutral"
         self._render_thread = None
@@ -49,5 +50,7 @@ class SimpleRenderer:
 
     def _draw_status(self):
         # Print a single line, overwriting the previous one
-        sys.stdout.write(f"\rE-Pet: {self.current_mood} " + " " * 10)  # pad to clear
-        sys.stdout.flush()
+        if not getattr(sys.stdout, "isatty", lambda: False)():
+            return
+        label = "Assistant" if self.assistant_mode else "E-Pet"
+        print(f"\r{label}: {self.current_mood} " + " " * 10, end="", flush=True)

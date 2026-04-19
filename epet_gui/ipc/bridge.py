@@ -69,7 +69,19 @@ def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, sort_keys=False)
             handle.write("\n")
-        os.replace(tmp_path, path)
+        attempts = 3 if os.name == "nt" else 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                os.replace(tmp_path, path)
+                last_error = None
+                break
+            except PermissionError as exc:
+                last_error = exc
+                if attempt < attempts:
+                    time.sleep(0.05)
+        if last_error is not None:
+            raise last_error
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -85,7 +97,19 @@ def write_yaml_atomic(path: Path, data: Dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             yaml.safe_dump(data, handle, sort_keys=False)
-        os.replace(tmp_path, path)
+        attempts = 3 if os.name == "nt" else 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                os.replace(tmp_path, path)
+                last_error = None
+                break
+            except PermissionError as exc:
+                last_error = exc
+                if attempt < attempts:
+                    time.sleep(0.05)
+        if last_error is not None:
+            raise last_error
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -113,37 +137,46 @@ def collect_memory_stats(memory) -> Dict[str, Any]:
         return stats
 
     try:
-        # This function intentionally reads the SQLite connection under the
-        # memory object's private lock. Do not call it while holding the public
-        # Memory API lock on another thread.
-        with memory._lock:  # noqa: SLF001 - read-only status snapshot for GUI
-            cursor = memory.conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM memories WHERE category = 'facts'")
-            stats["facts_total"] = int(cursor.fetchone()[0] or 0)
-            cursor.execute("SELECT COUNT(*) FROM events")
-            stats["event_count"] = int(cursor.fetchone()[0] or 0)
-            cursor.execute("SELECT COUNT(*) FROM memories")
-            stats["memory_count"] = int(cursor.fetchone()[0] or 0)
-            cursor.execute("SELECT value FROM kv WHERE key = 'current_mood'")
-            row = cursor.fetchone()
-            if row and row[0]:
-                stats["current_mood"] = row[0]
-            cursor.execute("SELECT value FROM memories WHERE category = 'conversation' AND key = 'history'")
-            row = cursor.fetchone()
-            if row and row[0]:
-                try:
-                    history = json.loads(row[0])
-                    if isinstance(history, list):
-                        stats["conversation_count"] = len(history)
-                except Exception:
-                    pass
-            cursor.execute("SELECT value FROM memories WHERE category = 'personality' AND key = 'interaction_count'")
-            row = cursor.fetchone()
-            if row and row[0]:
-                try:
-                    stats["interaction_count"] = int(row[0])
-                except Exception:
-                    pass
+        if hasattr(memory, "stats"):
+            stats.update(memory.stats())
+            return stats
+
+        if hasattr(memory, "export"):
+            exported = memory.export()
+            if isinstance(exported, dict):
+                kv = exported.get("kv", {})
+                memories = exported.get("memories", {})
+                events = exported.get("events", [])
+                stats["facts_total"] = len((memories or {}).get("facts", {})) if isinstance(memories, dict) else 0
+                stats["event_count"] = len(events) if isinstance(events, list) else 0
+                stats["memory_count"] = (
+                    sum(len(items) for items in memories.values()) + len(kv)
+                    if isinstance(memories, dict) and isinstance(kv, dict)
+                    else 0
+                )
+                current_mood = kv.get("current_mood") if isinstance(kv, dict) else None
+                if current_mood:
+                    stats["current_mood"] = current_mood
+                if isinstance(memories, dict):
+                    conversation = memories.get("conversation", {})
+                    if isinstance(conversation, dict):
+                        raw_history = conversation.get("history")
+                        if raw_history:
+                            try:
+                                history = json.loads(raw_history)
+                                if isinstance(history, list):
+                                    stats["conversation_count"] = len(history)
+                            except Exception:
+                                pass
+                    personality = memories.get("personality", {})
+                    if isinstance(personality, dict):
+                        raw_count = personality.get("interaction_count")
+                        if raw_count:
+                            try:
+                                stats["interaction_count"] = int(raw_count)
+                            except Exception:
+                                pass
+                return stats
     except Exception:
         return stats
     return stats
@@ -196,6 +229,8 @@ def dispatch_command(bus, payload: Dict[str, Any], logger=None) -> str:
     if command == "speak":
         text = str(args.get("text", "")).strip()
         if text:
+            if logger and hasattr(bus, "has_subscribers") and not bus.has_subscribers("pet/speak/say"):
+                logger.warning("No subscribers for pet/speak/say; speech command will be dropped")
             bus.publish("pet/speak/say", {"text": text, "emotion": args.get("emotion", "neutral"), "listen_after": bool(args.get("listen_after", False))})
             return "ok"
         return "missing_text"
@@ -203,6 +238,8 @@ def dispatch_command(bus, payload: Dict[str, Any], logger=None) -> str:
     if command == "inject_speech":
         text = str(args.get("text", "")).strip()
         if text:
+            if logger and hasattr(bus, "has_subscribers") and not bus.has_subscribers("pet/input/speech"):
+                logger.warning("No subscribers for pet/input/speech; injected speech will be dropped")
             bus.publish("pet/input/speech", {"text": text, "confidence": 1.0, "source": args.get("source", "gui")})
             return "ok"
         return "missing_text"

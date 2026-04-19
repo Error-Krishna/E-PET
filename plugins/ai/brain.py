@@ -7,8 +7,10 @@ import threading
 import time
 import uuid
 import re
+from typing import Any
 
 from core.platform_utils import resolve_executable
+from plugins.os_bridge.intent_parser import parse_command
 from core.utils import profile, unwrap_event_payload
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ GROQ_API_BASE_URL = "https://api.groq.com"
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 OLLAMA_GENERATE_PATH = "/api/generate"
-OLLAMA_DEFAULT_MODEL = "phi3-latest"
+OLLAMA_DEFAULT_MODEL = "phi3:latest"
 OLLAMA_FAST_MODEL = "phi3:mini"
 
 
@@ -39,6 +41,9 @@ class AIBrain:
         "set_mood",
         "open_app",
         "open_url",
+        "open_website",
+        "google_search",
+        "youtube_search",
         "save_file",
         "read_screen",
         "type_text",
@@ -79,8 +84,10 @@ class AIBrain:
         self._last_backend_status: tuple[str | None, str | None] = (None, None)
         self._ollama_start_lock = threading.Lock()
         self._groq_available_cache: tuple[float, bool] = (0.0, False)
+        self._request_queue = self._queue
+        self._request_queue_lock = threading.Lock()
         self.bus.subscribe("pet/input/speech", self._on_speech)
-        self.bus.subscribe("pet/ai/response", self._on_response)  # for chain? Not needed
+        self.bus.subscribe("pet/os_bridge/result", self._on_os_result)
 
     def _fallback_payload(self):
         return json.dumps(
@@ -113,14 +120,14 @@ class AIBrain:
             return False
 
         cached_at, cached_value = self._groq_available_cache
-        if time.time() - cached_at < 60:
+        if time.time() - cached_at < 300:
             return cached_value
 
         try:
             response = requests.get(
                 f"{GROQ_API_BASE_URL}/openai/v1/models",
                 headers={"Authorization": f"Bearer {self.groq_api_key}"},
-                timeout=min(3, float(self.request_timeout)),
+                timeout=min(1, float(self.request_timeout)),
             )
             available = response is not None and response.status_code == 200
             self._groq_available_cache = (time.time(), available)
@@ -336,6 +343,9 @@ class AIBrain:
 
     def _generate_ai_response(self, prompt):
         if self.mode == "online":
+            if not self.groq_api_key:
+                logger.warning("Groq API key missing; returning fallback response in online mode")
+                return self._fallback_payload()
             self._publish_backend_status("groq", "online mode")
             try:
                 return self._groq_inference(prompt)
@@ -361,7 +371,8 @@ class AIBrain:
         raise ValueError(f"Unknown AI mode: {self.mode}")
 
     def start(self):
-        if hasattr(self.bus, "_ai_queue"):
+        self._request_queue = getattr(self.bus, "_ai_queue", self._queue)
+        if self._request_queue is not self._queue:
             logger.info("AI: request queue ready")
             return
         self._thread = threading.Thread(target=self._process_queue, daemon=True)
@@ -399,39 +410,80 @@ class AIBrain:
         text = data.get("text", "")
         if not text:
             return
-        target_queue = getattr(self.bus, "_ai_queue", self._queue)
-        try:
+        target_queue = self._request_queue
+        with self._request_queue_lock:
+            while True:
+                try:
+                    target_queue.get_nowait()
+                except queue.Empty:
+                    break
             try:
-                target_queue.get_nowait()
-            except queue.Empty:
-                pass
-            target_queue.put_nowait(text)
-        except queue.Full:
-            try:
-                target_queue.get_nowait()
-            except queue.Empty:
-                pass
-            target_queue.put_nowait(text)
-
-    def _on_response(self, topic, data):
-        return None
+                target_queue.put_nowait(text)
+            except queue.Full:
+                try:
+                    target_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                target_queue.put_nowait(text)
 
     def _process_queue(self):
         while self._running:
             try:
-                text = self._queue.get(timeout=0.2)
+                text = self._request_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             if text is None:
                 break
             self._process_ai_request(text)
 
+    def _on_os_result(self, topic, data):
+        data = unwrap_event_payload(data)
+        summary = str(data.get("summary", "")).strip()
+        results = data.get("results", {})
+        if not summary and not results:
+            return
+        narration = self._narrate_results(results, summary)
+        if narration:
+            self.bus.publish(
+                "pet/speak/say",
+                {
+                    "text": narration,
+                    "emotion": "neutral",
+                    "listen_after": False,
+                },
+            )
+
+    def _narrate_results(self, results, summary):
+        if isinstance(results, dict):
+            for step_result in results.values():
+                if isinstance(step_result, dict):
+                    if "percent" in step_result:
+                        pct = step_result.get("percent", 0)
+                        charging = step_result.get("charging", False)
+                        return f"Battery is at {pct}%, {'charging' if charging else 'not charging'}."
+                    if "text" in step_result and len(str(step_result["text"])) < 500:
+                        return f"Here's what I found: {str(step_result['text'])[:200]}"
+        return summary
+
     def _process_ai_request(self, text):
+        parsed_command = parse_command(text)
+        if parsed_command.matched and parsed_command.actions:
+            text = str(text or "").strip()
+            self._publish_planned_task(
+                user_text=text,
+                response_text=parsed_command.response_text or "Done.",
+                intent="task",
+                emotion="neutral",
+                actions=parsed_command.actions,
+                assistant_mode=bool(self.config.get("personality", {}).get("assistant_mode", False)),
+            )
+            return
+
         offline_mode = self.mode == "offline"
         # Build context
         if hasattr(self.bus, "_memory_manager"):
             context_limit = 4 if offline_mode else 8
-            context = self.bus._memory_manager.get_context(limit=context_limit)
+            context = self.bus._memory_manager.get_context(limit=context_limit, query=text)
             user_name = getattr(self.bus._memory_manager, "user_name", "")
         else:
             context = ""
@@ -443,6 +495,7 @@ class AIBrain:
         energy = personality.get("energy", 0.6)
         sociability = personality.get("sociability", 0.5)
         bond_level = personality.get("bond_level", 0.0)
+        assistant_mode = bool(personality.get("assistant_mode", False))
         current_mood = "neutral"
         if self.memory is not None:
             current_mood = self.memory.get("current_mood") or "neutral"
@@ -452,7 +505,30 @@ class AIBrain:
             if owner_name
             else "Owner name is unknown. Never invent one."
         )
-        if offline_mode:
+        if assistant_mode:
+            prompt = f"""You are E-Pet, a practical, technically competent AI assistant.
+
+Reply as a single JSON object only.
+Use this shape:
+{{"text":"...","intent":"task|question|social|system","emotion_suggestion":"neutral","actions":[]}}
+
+Rules:
+- Be concise, calm, and helpful.
+- Do not roleplay as a pet.
+- Do not be dramatic, playful, needy, or emotionally expressive.
+- Never invent the owner's name.
+- Use the current conversation context and stored facts to answer clearly.
+- Internally plan before answering or acting, and prefer the smallest reliable action sequence.
+- If the user gives a command, return intent "task" with ordered actions.
+- If not a command, respond naturally as a straightforward assistant.
+
+Current mood: neutral
+{owner_line}
+User message: "{text}"
+Context:
+{context}
+"""
+        elif offline_mode:
             prompt = f"""You are {pet_name}, a warm virtual pet.
 
 Reply as a single JSON object only.
@@ -514,6 +590,9 @@ Command routing rules:
 - If the command is clear enough to execute, produce ordered actions with step numbers.
 - If the command includes an app name, use it directly.
 - If the command mentions a website or URL, include an open_url action with the exact URL.
+- If the user asks for YouTube, Google, Gmail, GitHub, Reddit, X, Netflix, Spotify, or similar services, treat them as websites and use open_website or open_url, not open_app.
+- If the user wants to search Google, use google_search.
+- If the user wants to search or play on YouTube, use youtube_search.
 - If the command asks to save a file, include a save_file action with the filename.
 - If the command asks to type text, include a type_text action with the exact text to type.
 - If the command asks to press keys, include press or hotkey actions as appropriate.
@@ -532,11 +611,14 @@ Allowed actions:
 - {{ "step": 2, "type": "set_mood", "value": "happy" }}
 - {{ "step": 3, "type": "open_app", "target": "TextEdit" }}
 - {{ "step": 4, "type": "open_url", "url": "https://example.com" }}
-- {{ "step": 5, "type": "save_file", "filename": "note.txt" }}
-- {{ "step": 6, "type": "read_screen" }}
-- {{ "step": 7, "type": "type_text", "text": "hello world" }}
-- {{ "step": 8, "type": "press", "key": "enter" }}
-- {{ "step": 9, "type": "hotkey", "keys": ["ctrl", "s"] }}
+- {{ "step": 5, "type": "open_website", "name": "youtube" }}
+- {{ "step": 6, "type": "google_search", "query": "pet care tips" }}
+- {{ "step": 7, "type": "youtube_search", "query": "cat training" }}
+- {{ "step": 8, "type": "save_file", "filename": "note.txt" }}
+- {{ "step": 9, "type": "read_screen" }}
+- {{ "step": 10, "type": "type_text", "text": "hello world" }}
+- {{ "step": 11, "type": "press", "key": "enter" }}
+- {{ "step": 12, "type": "hotkey", "keys": ["ctrl", "s"] }}
 
 For any task, include the actions that should happen in order. If there are no side effects, actions may be an empty list.
 
@@ -557,35 +639,112 @@ Example:
             intent = "system"
             emotion = "neutral"
             actions = []
+        if assistant_mode:
+            emotion = "neutral"
         listen_after = intent == "question" or text_out.rstrip().endswith("?")
+        self._publish_planned_task(
+            user_text=text,
+            response_text=text_out,
+            intent=intent,
+            emotion=emotion,
+            actions=actions,
+            assistant_mode=assistant_mode,
+            listen_after=listen_after,
+        )
+
+    def _publish_planned_task(self, user_text, response_text, intent, emotion, actions, assistant_mode, listen_after=False):
+        plan_payload = self._build_plan_payload(
+            user_text=user_text,
+            response_text=response_text,
+            intent=intent,
+            emotion=emotion,
+            actions=actions,
+            assistant_mode=assistant_mode,
+        )
         action_task = None
         if actions:
             action_task = {
                 "task_id": f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
                 "actions": actions,
             }
-        # Publish response
         self.bus.publish(
             "pet/ai/response",
             {
-                "text": text_out,
+                "text": response_text,
                 "intent": intent,
                 "emotion_suggestion": emotion,
                 "actions": actions,
                 "listen_after": listen_after,
             },
         )
+        self.bus.publish("pet/ai/plan", plan_payload)
         if action_task is not None:
             self.bus.publish("pet/ai/action", action_task)
-        # Also publish speak request
         self.bus.publish(
             "pet/speak/say",
             {
-                "text": text_out,
+                "text": response_text,
                 "emotion": emotion,
                 "listen_after": listen_after,
             },
         )
+
+    def _build_plan_payload(self, user_text, response_text, intent, emotion, actions, assistant_mode):
+        steps = []
+        for index, action in enumerate(actions, start=1):
+            if not isinstance(action, dict):
+                continue
+            step = {
+                "step": int(action.get("step", index) or index),
+                "type": str(action.get("type", "")),
+                "description": self._describe_action(action),
+            }
+            for field in ("target", "url", "query", "filename", "key", "value"):
+                if action.get(field) is not None:
+                    step[field] = action.get(field)
+            steps.append(step)
+        steps.sort(key=lambda item: item.get("step", 0))
+        return {
+            "task_id": f"plan_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
+            "user_text": user_text,
+            "response_text": response_text,
+            "intent": intent,
+            "emotion_suggestion": emotion,
+            "assistant_mode": assistant_mode,
+            "steps": steps,
+            "requires_confirmation": any(
+                isinstance(action, dict) and action.get("type") in {"save_file"}
+                for action in actions
+            ),
+        }
+
+    def _describe_action(self, action):
+        action_type = str(action.get("type", "")).strip()
+        if action_type == "open_app":
+            return f"open app {action.get('target')}"
+        if action_type == "open_url":
+            return f"open url {action.get('url')}"
+        if action_type == "open_website":
+            return f"open website {action.get('name')}"
+        if action_type == "google_search":
+            return f"search Google for {action.get('query')}"
+        if action_type == "youtube_search":
+            return f"search YouTube for {action.get('query')}"
+        if action_type == "type_text":
+            return "type text"
+        if action_type == "press":
+            return f"press {action.get('key')}"
+        if action_type == "hotkey":
+            return f"hotkey {'+'.join(action.get('keys', []))}"
+        if action_type == "save_file":
+            return f"save file {action.get('filename')}"
+        if action_type == "read_screen":
+            return "read screen"
+        if action_type == "remember_fact":
+            return f"remember fact {action.get('key')}"
+        if action_type == "set_mood":
+            return f"set mood {action.get('value')}"
+        return action_type or "action"
 
     def _parse_model_response(self, response):
         """Extract and parse the first JSON object from model output."""
@@ -674,6 +833,33 @@ Example:
                 url = str(action.get("url") or action.get("target") or "").strip()
                 if url:
                     item = {"type": action_type, "url": url}
+                    if action.get("step") is not None:
+                        item["step"] = int(action.get("step") or 0)
+                    normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
+            elif action_type == "open_website":
+                name = str(action.get("name") or action.get("target") or "").strip()
+                if name:
+                    item = {"type": action_type, "name": name}
+                    if action.get("step") is not None:
+                        item["step"] = int(action.get("step") or 0)
+                    normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
+            elif action_type == "google_search":
+                query = str(action.get("query") or action.get("target") or "").strip()
+                if query:
+                    item = {"type": action_type, "query": query}
+                    if action.get("step") is not None:
+                        item["step"] = int(action.get("step") or 0)
+                    normalized.append(item)
+                else:
+                    logger.debug("Dropping action %s: missing required field", action)
+            elif action_type == "youtube_search":
+                query = str(action.get("query") or action.get("target") or "").strip()
+                if query:
+                    item = {"type": action_type, "query": query}
                     if action.get("step") is not None:
                         item["step"] = int(action.get("step") or 0)
                     normalized.append(item)

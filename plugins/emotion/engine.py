@@ -43,36 +43,58 @@ class EmotionEngine:
 
         self.current_mood = None
         self.energy_level = config.get("personality", {}).get("energy", 0.6)
+        self.assistant_mode = bool(config.get("personality", {}).get("assistant_mode", False))
         self.last_interaction_time = time.time()
         self._running = True
+        self._subscriptions = []
 
         # Idle thresholds from config
         self.bored_after = config.get("idle", {}).get("bored_after", 120)
         self.sleepy_after = config.get("idle", {}).get("sleepy_after", 300)
 
         # Restore saved mood
-        saved = memory.get("current_mood")
-        if saved and saved in MOODS:
-            self.current_mood = saved
-        else:
+        if self.assistant_mode:
             self.current_mood = "neutral"
+            self.memory.set("current_mood", "neutral")
+        else:
+            saved = memory.get("current_mood")
+            if saved and saved in MOODS:
+                self.current_mood = saved
+            else:
+                self.current_mood = "neutral"
 
         # Initialise hardware
         self._apply_mood()
 
     def start(self):
         # Subscribe to events
-        self.bus.subscribe("pet/input/touch", self._on_touch)
-        self.bus.subscribe("pet/system/tick", self._on_tick)
-        self.bus.subscribe("pet/input/keyboard", self._on_debug)
-        self.bus.subscribe("pet/ai/response", self._on_ai_response)
-        self.bus.subscribe("pet/ai/action", self._on_ai_action)
+        self._running = True
+        self._subscribe("pet/input/touch", self._on_touch)
+        self._subscribe("pet/system/tick", self._on_tick)
+        self._subscribe("pet/input/keyboard", self._on_debug)
+        self._subscribe("pet/ai/response", self._on_ai_response)
+        self._subscribe("pet/ai/action", self._on_ai_action)
         logger.info("Emotion: ready")
 
     def stop(self):
         self._running = False
+        unsubscribe = getattr(self.bus, "unsubscribe", None)
+        if callable(unsubscribe):
+            for pattern, callback in self._subscriptions:
+                unsubscribe(pattern, callback)
+        self._subscriptions = []
+
+    def _subscribe(self, pattern, callback):
+        self.bus.subscribe(pattern, callback)
+        self._subscriptions.append((pattern, callback))
 
     def _on_touch(self, topic, data):
+        if not self._running:
+            return
+        if self.assistant_mode:
+            self.last_interaction_time = time.time()
+            self._enforce_assistant_neutral()
+            return
         data = unwrap_event_payload(data)
         zone = data.get("zone")
         if zone in TOUCH_MOOD:
@@ -81,6 +103,11 @@ class EmotionEngine:
         self.last_interaction_time = time.time()
 
     def _on_tick(self, topic, data):
+        if not self._running:
+            return
+        if self.assistant_mode:
+            self._enforce_assistant_neutral()
+            return
         data = unwrap_event_payload(data)
         if not self._running:
             return
@@ -92,9 +119,14 @@ class EmotionEngine:
             self._change_mood("bored", triggered_by="idle")
 
     def _on_debug(self, topic, data):
+        if not self._running:
+            return
         data = unwrap_event_payload(data)
         action = data.get("action")
         if action == "cycle_mood":
+            if self.assistant_mode:
+                self._enforce_assistant_neutral()
+                return
             moods = list(MOODS.keys())
             idx = moods.index(self.current_mood)
             next_mood = moods[(idx + 1) % len(moods)]
@@ -103,12 +135,22 @@ class EmotionEngine:
             self.bus.publish("pet/sound/play", {"name": "notification"})
 
     def _on_ai_response(self, topic, data):
+        if not self._running:
+            return
+        if self.assistant_mode:
+            self._enforce_assistant_neutral()
+            return
         data = unwrap_event_payload(data)
         suggestion = data.get("emotion_suggestion")
         if suggestion and suggestion in MOODS:
             self._change_mood(suggestion, triggered_by="ai")
 
     def _on_ai_action(self, topic, data):
+        if not self._running:
+            return
+        if self.assistant_mode:
+            self._enforce_assistant_neutral()
+            return
         data = unwrap_event_payload(data)
         actions = data.get("actions") if isinstance(data, dict) else None
         if actions is None:
@@ -122,6 +164,8 @@ class EmotionEngine:
                     self._change_mood(mood, triggered_by="ai_action")
 
     def _change_mood(self, new_mood, triggered_by=""):
+        if self.assistant_mode:
+            new_mood = "neutral"
         if new_mood == self.current_mood:
             return
         self.current_mood = new_mood
@@ -146,6 +190,13 @@ class EmotionEngine:
         self.hal.set_face(mood["face"])
         self.hal.set_led(mood["led_color"], "static")
         # Don't play sound directly; sound engine will handle via pet/emotion/changed
+
+    def _enforce_assistant_neutral(self):
+        """Keep assistant mode pinned to neutral, even if other engines emit mood changes."""
+        if self.current_mood != "neutral":
+            self.current_mood = "neutral"
+        self.memory.set("current_mood", "neutral")
+        self._apply_mood()
 
 def start(bus, hal, memory, config):
     engine = EmotionEngine(bus, hal, memory, config)

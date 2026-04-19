@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -188,8 +189,12 @@ class EpetControlCenter(QMainWindow):
             path = Path(str(raw)).expanduser()
             if not path.is_absolute():
                 path = self.config_path.parent / path
+            if not path.exists():
+                legacy_path = path.with_name("epet.db")
+                if legacy_path.exists():
+                    return legacy_path
             return path
-        return self.root / "epet.db"
+        return self.root / "epet.kv.json"
 
     def get_config(self):
         return deepcopy(self.config)
@@ -222,7 +227,22 @@ class EpetControlCenter(QMainWindow):
         self.statusBar().showMessage(f"Log path set to {new_path}", 2000)
 
     def is_pet_running(self) -> bool:
-        return self.pet_controls._process.state() != QProcess.NotRunning
+        if self.pet_controls._process.state() != QProcess.NotRunning:
+            return True
+        state_path = state_file_path(self.root)
+        try:
+            if not state_path.exists():
+                return False
+            with state_path.open("r", encoding="utf-8") as handle:
+                state = json.load(handle)
+            if not isinstance(state, dict):
+                return False
+            if not state.get("running"):
+                return False
+            timestamp = float(state.get("timestamp", 0.0) or 0.0)
+            return time.time() - timestamp < 10
+        except Exception:
+            return False
 
     def send_command(self, payload):
         from epet_gui.ipc.bridge import write_json_atomic
@@ -257,4 +277,4 @@ class EpetControlCenter(QMainWindow):
             self.restoreGeometry(geometry)
         else:
             self.resize(1440, 920)
-        self.move(100, 60)
+            self.move(100, 60)

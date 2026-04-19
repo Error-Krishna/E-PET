@@ -53,6 +53,24 @@ class EventBus:
             self._subscribers[pattern].append(callback)
         logger.debug(f"Subscribed callback to pattern: {pattern}")
 
+    def unsubscribe(self, pattern: str, callback: Callable[[str, Any], None]) -> None:
+        """Unsubscribe a callback from a topic pattern."""
+        with self._lock:
+            callbacks = self._subscribers.get(pattern)
+            if not callbacks:
+                return
+            try:
+                callbacks.remove(callback)
+            except ValueError:
+                return
+            if not callbacks:
+                self._subscribers.pop(pattern, None)
+        logger.debug(f"Unsubscribed callback from pattern: {pattern}")
+
+    def has_subscribers(self, topic: str) -> bool:
+        with self._lock:
+            return any(fnmatch.fnmatch(topic, pattern) for pattern in self._subscribers)
+
     def publish(self, topic: str, data: Any) -> None:
         """Publish an event to all subscribers matching the topic."""
         if self._ordered:
@@ -85,13 +103,24 @@ class EventBus:
             except queue.Full:
                 try:
                     dropped = domain_queue.get_nowait()
-                    logger.warning("[BUS] ordered queue for %s full; dropping oldest event", domain)
+                    dropped_topic = dropped["event"]["topic"] if isinstance(dropped, dict) else "unknown"
+                    logger.warning(
+                        "[BUS] ordered queue for %s full; dropping oldest event topic=%s",
+                        domain,
+                        dropped_topic,
+                    )
                 except queue.Empty:
                     dropped = None
+                    dropped_topic = topic
+                if topic == "pet/system/quit":
+                    logger.warning("[BUS] critical event bypassing full ordered queue: %s", topic)
+                    for callback in matching_callbacks:
+                        self._run_callback(callback, event["topic"], event)
+                    return
                 try:
                     domain_queue.put_nowait(packet)
                 except queue.Full:
-                    logger.warning("[BUS] ordered queue for %s still full; dropping new event", domain)
+                    logger.warning("[BUS] ordered queue for %s still full; dropping new event topic=%s", domain, topic)
             return
 
         if not matching_patterns:

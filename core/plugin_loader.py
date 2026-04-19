@@ -46,17 +46,19 @@ class PluginLoader:
 
         self._ensure_plugins_package()
 
-        for plugin_name in os.listdir(self.plugins_dir):
-            plugin_path = os.path.join(self.plugins_dir, plugin_name)
-            if not os.path.isdir(plugin_path):
-                continue
-            if plugin_name.startswith("__"):
-                continue
+        discovered = {
+            name
+            for name in os.listdir(self.plugins_dir)
+            if os.path.isdir(os.path.join(self.plugins_dir, name)) and not name.startswith("__")
+        }
+        ordered_plugins = [name for name in self.enabled_plugins if name in discovered]
+        ordered_plugins.extend(sorted(discovered - set(ordered_plugins)))
 
-            # Check if plugin is enabled
+        for plugin_name in ordered_plugins:
             if plugin_name not in self.enabled_plugins:
                 logger.debug(f"Plugin {plugin_name} is disabled")
                 continue
+            plugin_path = os.path.join(self.plugins_dir, plugin_name)
 
             # Check for plugin.py
             plugin_file = os.path.join(plugin_path, "plugin.py")
